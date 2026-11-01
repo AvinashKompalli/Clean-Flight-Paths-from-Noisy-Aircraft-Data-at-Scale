@@ -1,4 +1,31 @@
+# Python
 .venv/
 __pycache__/
 .pytest_cache/
+*.pyc
+*.pyo
+
+# IDE / tooling
+.vscode/
+.claude/
 .DS_Store
+
+# Archives / downloads
+*.zip
+*.crdownload
+
+# Secrets
+.env
+etl4/.env
+
+# Pipeline outputs — regenerated from source + raw downloads
+data/raw/
+data/bronze/
+data/eval/
+data/reference/synthetic_truth/
+etl4/data/
+
+# Session-local dumps and proposal source not meant for the repo
+ETL4 (3) (1).pdf
+OpenSky API Dataset pull.txt
+chat dump export1.txt

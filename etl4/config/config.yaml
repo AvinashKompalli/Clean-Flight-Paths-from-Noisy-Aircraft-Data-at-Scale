@@ -1,0 +1,24 @@
+# One file for all thresholds and paths.
+paths:
+  bronze_raw_states: data/bronze/raw_states
+  labels: data/reference/labels
+
+kafka:
+  topic_raw: adsb.raw
+  topic_dlq: adsb.dlq
+  partitions: 3          # 12 on cloud
+  replication_factor: 1
+
+replay:
+  speed_factors: [1, 10, 100, max]
+
+ingest:
+  # Regional box: west, south, east, north. TODO: you choose.
+  bounds: null
+  # Filter every Trino query by hour.
+  max_hours_per_query: 1
+
+synthetic:
+  n_aircraft: 20
+  step_seconds: 10
+  seed: 42

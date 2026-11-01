@@ -1,0 +1,11 @@
+pyopensky
+pandas
+numpy
+pyarrow
+pyyaml
+python-dotenv
+requests
+confluent-kafka
+duckdb
+pytest
+prometheus-client
