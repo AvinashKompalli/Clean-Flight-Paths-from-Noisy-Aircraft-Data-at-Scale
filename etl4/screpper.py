@@ -1,22 +1,36 @@
-"""Download OpenSky state vector data from its S3 bucket and convert to bronze Parquet.
+"""Download OpenSky data from its S3 bucket OR the Zenodo mirror, and convert
+to bronze Parquet.
 
-No Trino. No account. The dataset lives in a public S3 bucket behind a
-JavaScript bucket browser, so this script talks to the S3 XML API instead
-of scraping HTML.
+No Trino. No account. Two public sources are supported:
 
-You MUST read and accept the LICENSE in that bucket before you use the data.
+  s3     The OpenSky `data-samples` bucket (per-hour `.csv.tar` state vectors).
+         Browsed via an S3 XML API; URL auto-discovered from the bucket
+         browser page.
+  zenodo The OpenSky "Crowdsourced air traffic data" record series on Zenodo
+         (concept DOI 10.5281/zenodo.3737101). Files are monthly
+         `flightlist_YYYYMMDD_YYYYMMDD.csv.gz` — per-flight summaries, not
+         1 Hz state vectors. Use for flightlist analyses; the state-vector
+         pipeline cannot consume these directly.
+
+You MUST read and accept the LICENSE in the source before you use the data.
 
 Modes:
-  --list      List folders and files under a prefix. Use this first.
-  --download  Fetch files under a day prefix. Skips files already on disk.
+  --list      List folders and files (S3) or files in the latest Zenodo
+              version. Use this first.
+  --download  Fetch files. On Zenodo, --latest grabs the newest-dated
+              flightlist in the latest version.
   --convert   Read the .csv.gz files, write bronze Parquet with an explicit
               schema, and print the volume numbers for the report.
+              S3 only: Zenodo flightlists have a different schema.
 
 Examples:
-  python ingest/opensky_scraper.py --list
-  python ingest/opensky_scraper.py --list --prefix states/2026-10-20/
-  python ingest/opensky_scraper.py --download --prefix states/2026-10-20/ --hours 0
-  python ingest/opensky_scraper.py --convert --date 2026-10-20 --hours 0
+  python etl4/screpper.py --list
+  python etl4/screpper.py --list --prefix states/2026-10-20/
+  python etl4/screpper.py --download --prefix states/2026-10-20/ --hours 0
+  python etl4/screpper.py --convert --date 2026-10-20 --hours 0
+  python etl4/screpper.py --repo zenodo --list
+  python etl4/screpper.py --repo zenodo --download --latest
+  python etl4/screpper.py --repo zenodo --download --prefix flightlist_20221
 """
 import argparse
 import datetime
@@ -40,11 +54,19 @@ CFG = yaml.safe_load(_cfg_file.read_text()) if _cfg_file.exists() else {
 
 BROWSER_URL = "https://opensky-network.org/datasets/"
 RAW_DIR = ROOT / "data" / "raw" / "opensky_states"
+ZENODO_RAW_DIR = ROOT / "data" / "raw" / "opensky_flightlists"
 UA = "etl4-iisc-student-project/0.2 (academic use)"
 DELAY_S = 1.0          # be polite. Do not remove.
 MAX_RETRIES = 3
 OPENSKY_FIRST_DATE = "2019-01-01"  # oldest date in the S3 bucket
 S3_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+
+# Zenodo API endpoint + the OpenSky "Crowdsourced air traffic data" concept.
+# The concept ID is stable; the version record changes with each monthly
+# refresh (v20.10, v21.01, ..., v23.00, ...). We always resolve to the
+# newest version at query time.
+ZENODO_API = "https://zenodo.org/api"
+ZENODO_OPENSKY_FLIGHTLIST_CONCEPT = 3737101
 
 # Explicit schema. CSV carries no types. Inference corrupts four of these:
 # icao24 loses leading zeros, squawk is octal text, the flags are text.
@@ -255,6 +277,96 @@ def download_date(s, bucket, date_str, hours, max_mb, dry_run=False):
 
 
 # --------------------------------------------------------------------------
+# Zenodo (per-flight "flightlist" record series)
+# --------------------------------------------------------------------------
+def zenodo_latest_version(s, concept_id=ZENODO_OPENSKY_FLIGHTLIST_CONCEPT):
+    """Return the Zenodo record metadata for the newest version of a concept.
+
+    Zenodo stores a concept as the lineage and each dated release as its
+    own record. The newest is the first hit when sorted by publication
+    date descending.
+    """
+    url = f"{ZENODO_API}/records"
+    r = get(s, url, params={
+        "q": f"conceptrecid:{concept_id}",
+        "all_versions": 1,
+        "sort": "mostrecent",
+        "size": 1,
+    })
+    hits = r.json().get("hits", {}).get("hits", [])
+    if not hits:
+        raise RuntimeError(f"No Zenodo records for concept {concept_id}")
+    return hits[0]
+
+
+def zenodo_list(s, concept_id=ZENODO_OPENSKY_FLIGHTLIST_CONCEPT, prefix=""):
+    """List files in the latest version of a Zenodo concept.
+
+    Returns the record metadata and a filtered list of {key, size, url}.
+    `prefix` is a filename substring match (not an S3-style path).
+    """
+    rec = zenodo_latest_version(s, concept_id)
+    files = []
+    for f in rec.get("files", []):
+        key = f.get("key", "")
+        if prefix and prefix not in key:
+            continue
+        files.append({
+            "key":  key,
+            "size": int(f.get("size", 0)),
+            "url":  f.get("links", {}).get("self", ""),
+        })
+    # Sort by filename: the per-month flightlists sort by date naturally.
+    files.sort(key=lambda d: d["key"])
+    return rec, files
+
+
+_FLIGHTLIST_DATE_RE = re.compile(r"(\d{8})_(\d{8})")
+
+
+def zenodo_pick_latest_dated(files):
+    """Return the flightlist file whose date range ends latest.
+
+    The OpenSky flightlist naming pattern is flightlist_YYYYMMDD_YYYYMMDD.*.
+    Picks the file with the maximum second date; falls back to the last
+    file in name order if no files match the pattern.
+    """
+    dated = []
+    for f in files:
+        m = _FLIGHTLIST_DATE_RE.search(f["key"])
+        if m:
+            dated.append((m.group(2), f))
+    if not dated:
+        return files[-1] if files else None
+    dated.sort(key=lambda t: t[0])
+    return dated[-1][1]
+
+
+def zenodo_download(s, files, out_dir, max_mb, dry_run=False):
+    """Fetch each file in `files` into out_dir. Idempotent: skip existing.
+
+    Returns (n_files, n_bytes) actually downloaded (0 when dry_run).
+    """
+    total_bytes = 0
+    n_out = 0
+    out_dir = Path(out_dir)
+    for f in files:
+        size_mb = f["size"] / 1e6
+        if dry_run:
+            print(f"  DRY-RUN  {size_mb:8.1f} MB  {f['url']}")
+            continue
+        dest = out_dir / f["key"]
+        if dest.exists() and dest.stat().st_size == f["size"]:
+            print(f"  SKIP     {size_mb:8.1f} MB  {dest.name} (already present)")
+            continue
+        print(f"  GET      {size_mb:8.1f} MB  {f['url']}")
+        download(s, f["url"], dest, max_mb)
+        total_bytes += f["size"]
+        n_out += 1
+    return n_out, total_bytes
+
+
+# --------------------------------------------------------------------------
 # Convert
 # --------------------------------------------------------------------------
 def _csv_from_bytes(raw: bytes) -> pd.DataFrame:
@@ -424,8 +536,11 @@ def main():
 
     yesterday = str(datetime.date.today() - datetime.timedelta(days=1))
 
+    p.add_argument("--repo", default="s3", choices=["s3", "zenodo"],
+                   help="data source: s3 (default) or zenodo")
     p.add_argument("--bucket-url", help="skip discovery and use this S3 endpoint")
-    p.add_argument("--prefix", default="", help="S3 prefix, e.g. states/2026-10-20/")
+    p.add_argument("--prefix", default="",
+                   help="S3 path prefix (s3) or filename substring (zenodo)")
     p.add_argument("--date", help="YYYY-MM-DD, for single-day --convert or --download")
     p.add_argument("--start-date", default=OPENSKY_FIRST_DATE,
                    help=f"first date in bulk range (default: {OPENSKY_FIRST_DATE})")
@@ -437,12 +552,22 @@ def main():
     p.add_argument("--dry-run", action="store_true",
                    help="print what would be downloaded without fetching anything")
     p.add_argument("--out", default=str(ROOT / CFG["paths"]["bronze_raw_states"]))
+    # Zenodo-only knobs
+    p.add_argument("--zenodo-concept", type=int,
+                   default=ZENODO_OPENSKY_FLIGHTLIST_CONCEPT,
+                   help=f"Zenodo concept ID (default: {ZENODO_OPENSKY_FLIGHTLIST_CONCEPT}, "
+                        f"OpenSky flightlists)")
+    p.add_argument("--latest", action="store_true",
+                   help="Zenodo: download only the newest-dated flightlist file")
     a = p.parse_args()
 
     hours = parse_hours(a.hours)
 
     # ---- convert ----
     if a.convert:
+        if a.repo == "zenodo":
+            sys.exit("convert is for OpenSky S3 state vectors; "
+                     "Zenodo flightlists use a different schema.")
         if a.date:
             convert(a.date, hours, a.out)
         else:
@@ -453,6 +578,50 @@ def main():
         return
 
     s = session()
+
+    # ---- Zenodo list / download ----
+    if a.repo == "zenodo":
+        rec, files = zenodo_list(s, a.zenodo_concept, prefix=a.prefix)
+        version = rec.get("metadata", {}).get("version", "?")
+        pub     = rec.get("metadata", {}).get("publication_date", "?")
+        title   = rec.get("metadata", {}).get("title", "?")
+        doi     = rec.get("doi", "?")
+        print(f"zenodo concept: {a.zenodo_concept}  record: {rec.get('id')}")
+        print(f"version: {version}  published: {pub}")
+        print(f"title:   {title}")
+        print(f"doi:     {doi}\n")
+
+        if a.list:
+            print(f"files ({len(files)}) matching prefix {a.prefix!r}:")
+            for f in files:
+                print(f"   {f['size'] / 1e6:9.1f} MB  {f['key']}")
+            if not files:
+                print("  nothing matched. Try without --prefix, or widen it.")
+            return
+
+        # download
+        if a.latest:
+            picked = zenodo_pick_latest_dated(files)
+            if not picked:
+                sys.exit("no files to pick from")
+            files = [picked]
+            print(f"--latest resolved to: {picked['key']}")
+
+        if not files:
+            sys.exit("no files matched. Widen --prefix or drop --latest.")
+
+        # "version" from Zenodo may or may not already start with "v". Normalise.
+        ver_str = version if str(version).startswith("v") else f"v{version}"
+        out_dir = ZENODO_RAW_DIR / ver_str
+        total_mb = sum(f["size"] for f in files) / 1e6
+        print(f"\n{len(files)} file(s), {total_mb:.1f} MB -> {out_dir}")
+        if a.dry_run:
+            print("DRY-RUN: listing only, no files will be fetched\n")
+        nf, nb = zenodo_download(s, files, out_dir, a.max_mb, dry_run=a.dry_run)
+        label = "DRY-RUN total" if a.dry_run else "Done"
+        print(f"\n{label}: {nf} file(s) fetched, {nb / 1e6:.1f} MB")
+        return
+
     bucket = a.bucket_url.rstrip("/") if a.bucket_url else discover_bucket(s)
     print(f"bucket: {bucket}\n")
 
