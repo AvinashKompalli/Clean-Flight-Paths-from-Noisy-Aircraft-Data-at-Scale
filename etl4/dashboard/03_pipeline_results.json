@@ -1,0 +1,546 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Reconstruction benchmark results: wall-clock, position RMSE, segmentation F1, continuity and deviation events across (method, noise). Backed by the Postgres pipeline_runs / eval_results / deviation_events tables.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Wall-clock seconds by (method, noise) - latest run per combo",
+      "type": "bargauge",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 60},
+              {"color": "red", "value": 300}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT method || ' | ' || noise AS label, wall_secs AS wall_s FROM ( SELECT method, noise, wall_secs, ROW_NUMBER() OVER (PARTITION BY method, noise ORDER BY started_at DESC) AS rn FROM pipeline_runs WHERE wall_secs IS NOT NULL ) t WHERE rn = 1 ORDER BY noise, method;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Position RMSE (metres) by (method, noise)",
+      "type": "bargauge",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lengthm",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 100},
+              {"color": "red", "value": 500}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS position_rmse_m FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'position_rmse_m' AND (r.run_id, e.metric) IN ( SELECT r2.run_id, e2.metric FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'position_rmse_m' AND (r2.method, r2.noise, e2.recorded_at) IN ( SELECT r3.method, r3.noise, MAX(e3.recorded_at) FROM eval_results e3 JOIN pipeline_runs r3 ON r3.run_id = e3.run_id WHERE e3.metric = 'position_rmse_m' GROUP BY r3.method, r3.noise ) ) ORDER BY r.noise, r.method;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Segmentation F1 by (method, noise) - 0..1",
+      "type": "bargauge",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "id": 3,
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "decimals": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.6},
+              {"color": "green", "value": 0.85}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS seg_f1 FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'seg_f1' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'seg_f1' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Continuity ratio by (method, noise) - 0..1",
+      "type": "bargauge",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "id": 4,
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "decimals": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.8},
+              {"color": "green", "value": 0.95}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS continuity FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'continuity' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'continuity' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Deviation events total",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 50},
+              {"color": "red", "value": 500}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS n FROM deviation_events;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Deviation events by type",
+      "type": "piechart",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": ["value", "percent"]
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT type, COUNT(*) AS n FROM deviation_events GROUP BY type ORDER BY n DESC;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Peak residual - max by method (latest 500 events)",
+      "type": "stat",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": true
+        },
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lengthm",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 300},
+              {"color": "red", "value": 1000}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT r.method AS metric, MAX(d.peak_residual) AS value FROM deviation_events d JOIN pipeline_runs r ON r.run_id = d.run_id GROUP BY r.method ORDER BY value DESC NULLS LAST;",
+          "rawQuery": true
+        }
+      ]
+    },
+    {
+      "title": "Latest 20 deviation events",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "Postgres"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      },
+      "id": 8,
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null}
+            ]
+          },
+          "custom": {
+            "align": "left",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "start_time"},
+            "properties": [
+              {"id": "unit", "value": "dateTimeAsIso"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "end_time"},
+            "properties": [
+              {"id": "unit", "value": "dateTimeAsIso"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "max_distance"},
+            "properties": [
+              {"id": "unit", "value": "lengthm"},
+              {"id": "decimals", "value": 1}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "peak_residual"},
+            "properties": [
+              {"id": "unit", "value": "lengthm"},
+              {"id": "decimals", "value": 1}
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "Postgres"
+          },
+          "format": "table",
+          "rawSql": "SELECT event_id, run_id, icao24, flight_id, start_time * 1000 AS start_time, end_time * 1000 AS end_time, type, max_distance, peak_residual FROM deviation_events ORDER BY end_time DESC LIMIT 20;",
+          "rawQuery": true
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["etl4", "postgres", "benchmark", "reconstruction"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "ETL4 - Pipeline Results",
+  "uid": "etl4-pipeline-results",
+  "version": 1,
+  "weekStart": ""
+}
