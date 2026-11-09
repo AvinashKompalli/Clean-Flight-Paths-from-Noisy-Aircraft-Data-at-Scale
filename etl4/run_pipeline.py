@@ -1,11 +1,14 @@
 """End-to-end pipeline runner.
 
-Takes a bronze Parquet source, runs all three reconstruction methods, writes
-the silver/gold Parquets, and appends one metric row per method to runs.csv.
+Takes a bronze Parquet source, runs each reconstruction method, appends one
+metric row per method to data/eval/runs.csv, and writes one pipeline_runs
+row to Postgres. With --write-silver and/or --write-gold, also persists:
+  silver = cleaned + event-time-ordered canonical schema (plan.md §6.1)
+  gold   = reconstructed per-flight output per method
 
 Usage:
-  python etl4/run_pipeline.py --bronze data/bronze/raw_states --source synthetic \
-      --truth data/reference/synthetic_truth
+  python etl4/run_pipeline.py --bronze data/bronze/synthetic --source synthetic \
+      --truth data/reference/synthetic_truth --write-silver --write-gold
   python etl4/run_pipeline.py --bronze data/bronze/raw_states --source s3
 """
 from __future__ import annotations
@@ -45,7 +48,14 @@ def main():
     p.add_argument("--noise",  default="N0", choices=["N0", "N1", "N2", "N3"])
     p.add_argument("--methods", nargs="+",
                    default=["time_gap", "kinematic", "kinematic_smoothing"])
+    p.add_argument("--write-silver", action="store_true",
+                   help="persist cleaned canonical schema to data/silver/<source>/<noise>/")
+    p.add_argument("--write-gold", action="store_true",
+                   help="persist reconstructed per-flight output to data/gold/<source>/<noise>/method=<m>/")
     a = p.parse_args()
+
+    silver_dir = ROOT / "data" / "silver" if a.write_silver else None
+    gold_dir   = ROOT / "data" / "gold"   if a.write_gold   else None
 
     bronze = _load_parquet(Path(a.bronze))
     truth  = _load_parquet(Path(a.truth)) if a.truth else None
@@ -54,7 +64,8 @@ def main():
 
     for method in a.methods:
         print(f"\n--- running method = {method} ---")
-        m = run_experiment(bronze, method, truth=truth, noise=a.noise, source=a.source)
+        m = run_experiment(bronze, method, truth=truth, noise=a.noise, source=a.source,
+                           write_silver_dir=silver_dir, write_gold_dir=gold_dir)
         run_id = write_run({
             **m,
             "source": a.source,

@@ -36,8 +36,19 @@ METHODS = {
 
 def run_experiment(bronze: pd.DataFrame, method: str, truth: pd.DataFrame | None = None,
                    noise: str = "N0", source: str = "synthetic",
-                   expected_step_s: float = 10.0) -> dict:
-    """Run one method end-to-end. Returns a dict of metrics + wall-clock cost."""
+                   expected_step_s: float = 10.0,
+                   write_silver_dir: Path | None = None,
+                   write_gold_dir: Path | None = None) -> dict:
+    """Run one method end-to-end. Returns a dict of metrics + wall-clock cost.
+
+    write_silver_dir, write_gold_dir: when set, persist the medallion layers.
+      silver = cleaned + event-time-ordered canonical schema (plan.md §6.1)
+      gold   = reconstructed per-flight with flight_id and method-specific cols
+
+    Layout:
+      <silver_dir>/<source>/<noise>/part.parquet
+      <gold_dir>/<source>/<noise>/method=<method>/part.parquet
+    """
     t0 = time.perf_counter()
     stage_times = {}
 
@@ -58,12 +69,24 @@ def run_experiment(bronze: pd.DataFrame, method: str, truth: pd.DataFrame | None
     df = event_time_order(df)
     stage("order")
 
+    if write_silver_dir is not None:
+        silver_path = Path(write_silver_dir) / source / noise / "part.parquet"
+        silver_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(silver_path, index=False)
+    stage("write_silver")
+
     df = kinematic_features(df)
     stage("features")
 
     fn = METHODS[method]
     df = fn(df)
     stage("segment")
+
+    if write_gold_dir is not None:
+        gold_path = Path(write_gold_dir) / source / noise / f"method={method}" / "part.parquet"
+        gold_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(gold_path, index=False)
+    stage("write_gold")
 
     deviations = detect_deviations(df, use_kalman_residual=(method == "kinematic_smoothing"))
     stage("deviations")
