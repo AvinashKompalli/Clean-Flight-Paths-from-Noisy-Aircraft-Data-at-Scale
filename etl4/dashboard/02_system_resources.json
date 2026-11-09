@@ -307,7 +307,7 @@
       ]
     },
     {
-      "title": "Spark executor count (requires Spark Prometheus exporter)",
+      "title": "Alive Spark workers",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
@@ -315,7 +315,7 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 18
       },
@@ -346,20 +346,7 @@
               {"color": "yellow", "value": 1},
               {"color": "green", "value": 2}
             ]
-          },
-          "mappings": [
-            {
-              "options": {
-                "match": "null",
-                "result": {
-                  "index": 0,
-                  "text": "N/A"
-                }
-              },
-              "type": "special"
-            }
-          ],
-          "noValue": "N/A - exporter not enabled"
+          }
         },
         "overrides": []
       },
@@ -370,8 +357,66 @@
             "type": "prometheus",
             "uid": "Prometheus"
           },
-          "expr": "sum(metrics_master_aliveWorkers_Value) or sum(spark_executor_count)",
-          "legendFormat": "executors",
+          "expr": "sum(metrics_master_aliveWorkers_Value)",
+          "legendFormat": "alive workers",
+          "range": false,
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "Running Spark apps",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 18
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "blue", "value": 1},
+              {"color": "orange", "value": 5}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "Prometheus"
+          },
+          "expr": "sum(metrics_master_apps_Value)",
+          "legendFormat": "running apps",
           "range": false,
           "instant": true
         }
@@ -386,8 +431,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 12,
         "y": 18
       },
       "id": 6,
@@ -444,8 +489,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 18,
         "y": 18
       },
       "id": 7,
