@@ -555,7 +555,7 @@ Per flight, produce an event when any of these hold for ≥ `MIN_EVENT_DURATION_
 
 - `|cross_track_m| > 5000 m` (off-route), OR
 - `baroaltitude` differs from a smoothed reference altitude (linear in time between endpoints) by > 500 m (altitude excursion), OR
-- `kalman_residual > 3 · MEAS_NOISE_M · sqrt(3) m` (residual spike; requires Method C upstream).
+- `kalman_residual > 3 · MEAS_NOISE_M · sqrt(3) m` (residual spike; the residual-based detector runs only when the `kalman_residual` column is present AND at least one row has a non-null value, so Method A/B outputs and Kalman-skipped singleton flights are ignored).
 
 Duration filtering uses run-length encoding over the boolean mask, not a window-rolling approach.
 

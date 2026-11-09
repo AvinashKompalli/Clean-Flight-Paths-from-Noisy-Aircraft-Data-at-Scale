@@ -71,7 +71,7 @@ MAX_GROUND_SPEED_MPS = 340.0     # Mach 1 at sea level; aircraft stay below this
 MIN_BARO_ALT_M       = -500.0
 MAX_BARO_ALT_M       = 15000.0
 
-DEDUP_KEYS = ["icao24", "time", "lat", "lon"]
+DEDUP_KEYS = ["icao24", "time"]
 
 
 def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:

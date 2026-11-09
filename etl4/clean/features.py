@@ -46,7 +46,7 @@ def kinematic_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     g = df.groupby("icao24", sort=False)
-    dt   = g["time"].diff()
+    dt   = g["time"].diff().fillna(0)
     df["dt"] = dt
 
     prev_lat = g["lat"].shift(1)
