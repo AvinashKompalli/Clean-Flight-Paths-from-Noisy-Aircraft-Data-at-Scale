@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 
 from etl4.bench.run_experiment import run_experiment
+from etl4.sink.postgres import write_run
 
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_CSV = ROOT / "data" / "eval" / "matrix.csv"
@@ -53,6 +54,17 @@ def main():
             print(f"\n>>> noise={noise}  method={method}", flush=True)
             m = run_experiment(bronze, method, truth=truth,
                                noise=noise, source=a.source)
+            # Postgres sink: writes pipeline_runs row + per-metric
+            # eval_results rows. Non-fatal — returns None if DB is down.
+            run_id = write_run({
+                **m,
+                "source": a.source,
+                "method": method,
+                "noise":  noise,
+                "rows_in": len(bronze),
+            })
+            if run_id:
+                print(f"    [postgres run_id={run_id}]", flush=True)
             rows.append({
                 "noise":      noise,
                 "method":     method,

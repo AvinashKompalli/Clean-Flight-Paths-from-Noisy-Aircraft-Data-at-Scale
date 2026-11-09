@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from etl4.bench.run_experiment import run_experiment
+from etl4.sink.postgres import write_run
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +55,13 @@ def main():
     for method in a.methods:
         print(f"\n--- running method = {method} ---")
         m = run_experiment(bronze, method, truth=truth, noise=a.noise, source=a.source)
+        run_id = write_run({
+            **m,
+            "source": a.source,
+            "method": method,
+            "noise":  a.noise,
+            "rows_in": len(bronze),
+        })
         headline = (
             f"method={method:<22}  rows_out={m['rows_out']:,}  "
             f"flights={m['n_flights']}  deviations={m['n_deviations']}  "
@@ -61,6 +69,8 @@ def main():
         )
         if "position_rmse_m" in m:
             headline += f"  rmse={m['position_rmse_m']:.1f} m  seg_f1={m.get('seg_f1', 0):.3f}"
+        if run_id:
+            headline += f"  [pg run_id={run_id}]"
         print(headline)
 
 

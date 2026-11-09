@@ -9,3 +9,4 @@ confluent-kafka
 duckdb
 pytest
 prometheus-client
+psycopg[binary]
