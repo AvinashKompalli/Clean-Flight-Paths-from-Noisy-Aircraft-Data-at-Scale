@@ -103,10 +103,13 @@ def run_experiment(bronze: pd.DataFrame, method: str, truth: pd.DataFrame | None
 
 
 def _flight_boundaries(df: pd.DataFrame) -> list:
-    """Return the first time of each flight segment — these are the boundaries."""
-    if "flight_id" not in df.columns:
+    """Return (icao24, start_time) for each flight segment — these are the
+    boundaries. Scoping to icao24 keeps boundaries on different aircraft from
+    cross-matching in `segmentation_prf`."""
+    if "flight_id" not in df.columns or df.empty:
         return []
-    return df.groupby("flight_id")["time"].min().tolist()
+    starts = df.groupby(["flight_id", "icao24"], sort=False)["time"].min().reset_index()
+    return list(zip(starts["icao24"].astype(str), starts["time"]))
 
 
 def _append_run(row: dict) -> None:
