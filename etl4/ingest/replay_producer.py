@@ -13,13 +13,18 @@ from pathlib import Path
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
-from prometheus_client import Counter, start_http_server
+from prometheus_client import Counter, Histogram, start_http_server
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parents[1]
 CFG = yaml.safe_load((ROOT / "config" / "config.yaml").read_text())
 
-RECORDS_SENT = Counter("replay_records_sent_total", "Records produced to Kafka")
+RECORDS_SENT = Counter("records_sent_total", "Records produced to Kafka")
+PRODUCE_LATENCY = Histogram(
+    "kafka_produce_latency_seconds",
+    "Latency of Kafka produce calls (seconds)",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
 
 
 def load_bronze(path):
@@ -69,8 +74,9 @@ def main():
 
         record = {k: _safe(v) for k, v in row._asdict().items()}
         value = json.dumps(record)
-        producer.produce(topic, key=str(row.icao24), value=value)
-        producer.poll(0)
+        with PRODUCE_LATENCY.time():
+            producer.produce(topic, key=str(row.icao24), value=value)
+            producer.poll(0)
         RECORDS_SENT.inc()
         sent += 1
 

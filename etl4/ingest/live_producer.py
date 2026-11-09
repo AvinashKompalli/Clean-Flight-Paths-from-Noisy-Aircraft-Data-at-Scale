@@ -29,10 +29,23 @@ from pathlib import Path
 import requests
 import yaml
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, start_http_server
 
 load_dotenv()
 ROOT = Path(__file__).resolve().parents[1]
 CFG = yaml.safe_load((ROOT / "config" / "config.yaml").read_text())
+
+RECORDS_SENT = Counter("records_sent_total", "Records produced to Kafka topic adsb.raw")
+RECORDS_DROPPED = Counter(
+    "records_dropped_total",
+    "Records diverted to DLQ instead of adsb.raw",
+    ["reason"],
+)
+PRODUCE_LATENCY = Histogram(
+    "kafka_produce_latency_seconds",
+    "Latency of Kafka produce calls (seconds)",
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
 
 OPENSKY_URL   = "https://opensky-network.org/api/states/all"
 OAUTH_URL     = ("https://auth.opensky-network.org/auth/realms/"
@@ -135,7 +148,11 @@ def main():
                    help="stop after this many records total (0 = run forever)")
     p.add_argument("--bounds", default=None,
                    help="west,south,east,north e.g. 68,8,97,37 for India bounding box")
+    p.add_argument("--metrics-port", type=int, default=8001,
+                   help="port where Prometheus metrics are exposed (default 8001)")
     a = p.parse_args()
+
+    start_http_server(a.metrics_port)
 
     bounds = None
     if a.bounds:
@@ -188,19 +205,23 @@ def main():
                         topic_dlq, key="malformed",
                         value=json.dumps({"error": "bad_shape", "row": row}),
                     )
+                    RECORDS_DROPPED.labels(reason="payload_too_short").inc()
                     batch_err += 1
                     continue
                 icao24 = row[0] or "unknown"
                 try:
                     record = _to_raw_record(row, snapshot_ts)
                     value = json.dumps({k: _safe(v) for k, v in record.items()})
-                    producer.produce(topic_raw, key=icao24, value=value)
+                    with PRODUCE_LATENCY.time():
+                        producer.produce(topic_raw, key=icao24, value=value)
+                    RECORDS_SENT.inc()
                     batch_sent += 1
                 except Exception as exc:
                     producer.produce(
                         topic_dlq, key=icao24,
                         value=json.dumps({"icao24": icao24, "error": str(exc)}),
                     )
+                    RECORDS_DROPPED.labels(reason="serialization_error").inc()
                     batch_err += 1
                 producer.poll(0)
 
