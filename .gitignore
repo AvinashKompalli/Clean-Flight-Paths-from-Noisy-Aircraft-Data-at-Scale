@@ -25,6 +25,9 @@ data/eval/
 data/reference/synthetic_truth/
 etl4/data/
 
+# Third-party installs (native Kafka, Java, etc.) — not project source
+software/
+
 # Session-local dumps and proposal source not meant for the repo
 ETL4 (3) (1).pdf
 OpenSky API Dataset pull.txt
