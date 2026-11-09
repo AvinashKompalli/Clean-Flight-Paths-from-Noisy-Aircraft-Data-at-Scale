@@ -69,12 +69,12 @@ services:
       - "4040:4040"     # driver UI
     environment:
       SPARK_NO_DAEMONIZE: "true"
+      SPARK_MASTER_OPTS: "-Dspark.ui.prometheus.enabled=true"
     command: >
       /opt/spark/bin/spark-class
         org.apache.spark.deploy.master.Master
         --host 0.0.0.0
         --webui-port 8080
-        -c spark.ui.prometheus.enabled=true
 
   spark-worker-1:
     image: apache/spark:3.5.3
@@ -82,12 +82,12 @@ services:
     user: root
     environment:
       SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_OPTS: "-Dspark.ui.prometheus.enabled=true"
     command: >
       /opt/spark/bin/spark-class
         org.apache.spark.deploy.worker.Worker
         spark://spark-master:7077
         --webui-port 8081
-        -c spark.ui.prometheus.enabled=true
     ports:
       - "8081:8081"
     depends_on:
@@ -99,12 +99,12 @@ services:
     user: root
     environment:
       SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_OPTS: "-Dspark.ui.prometheus.enabled=true"
     command: >
       /opt/spark/bin/spark-class
         org.apache.spark.deploy.worker.Worker
         spark://spark-master:7077
         --webui-port 8081
-        -c spark.ui.prometheus.enabled=true
     depends_on:
       - spark-master
 
