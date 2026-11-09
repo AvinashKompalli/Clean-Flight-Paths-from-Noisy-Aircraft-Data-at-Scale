@@ -18,6 +18,10 @@ R_EARTH_M = 6_371_000.0
 RESIDUAL_SIGMA = 3.0
 PROCESS_NOISE  = 1.0     # m/s^2  (tune per aircraft class if needed)
 MEAS_NOISE_M   = 25.0    # ADS-B position accuracy, metres
+# chi-square quantile, 3 dof, p=0.999 — innovations whose Mahalanobis² exceeds
+# this are rejected (roughly a 4-sigma event in 3-D position space). A
+# forward Kalman has no way to undo an outlier already fused, so gate first.
+CHI2_GATE = 16.27
 
 
 def _enu_from_latlon(lat, lon, alt, lat0, lon0, alt0):
@@ -50,6 +54,14 @@ class KalmanTrajectoryFilter:
         self.x = np.array([pos_enu[0], pos_enu[1], pos_enu[2], 0.0, 0.0, 0.0])
         self.P = np.eye(6) * 1e3
 
+    def _reset_with_velocity(self, pos_enu, vel_enu):
+        """Warm-start with a velocity prior estimated from the first two
+        samples — stops CHI2_GATE from misfiring on fast aircraft, where
+        the zero-velocity cold start produces a 2.5 km step-1 innovation."""
+        self.x = np.array([*pos_enu, *vel_enu])
+        self.P = np.eye(6) * 1e3
+        self.P[3, 3] = self.P[4, 4] = self.P[5, 5] = 100.0
+
     def _F(self, dt):
         F = np.eye(6)
         F[0, 3] = F[1, 4] = F[2, 5] = dt
@@ -76,10 +88,12 @@ class KalmanTrajectoryFilter:
         R = np.eye(3) * self.r ** 2
         y = np.array(pos_enu) - H @ self.x
         S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ y
-        self.P = (np.eye(6) - K @ H) @ self.P
-        return float(np.sqrt(y @ y))   # residual magnitude in metres
+        mahal2 = float(y @ np.linalg.solve(S, y))
+        if mahal2 <= CHI2_GATE:
+            K = self.P @ H.T @ np.linalg.inv(S)
+            self.x = self.x + K @ y
+            self.P = (np.eye(6) - K @ H) @ self.P
+        return float(np.sqrt(mahal2))   # unitless (standard deviations)
 
     def residual_threshold(self):
         return RESIDUAL_SIGMA * self.r * np.sqrt(3)
@@ -89,7 +103,7 @@ def smooth_and_segment(df: pd.DataFrame) -> pd.DataFrame:
     """Run Method B segmentation, then within each flight run the Kalman
     filter and append smoothed_lat/smoothed_lon/kalman_residual columns.
     """
-    df = segment_kinematic(df)
+    df = segment_kinematic(df, break_on_jump=False)
     if df.empty:
         for c in ("smoothed_lat", "smoothed_lon", "kalman_residual"):
             df[c] = np.nan
@@ -120,7 +134,14 @@ def smooth_and_segment(df: pd.DataFrame) -> pd.DataFrame:
 
         kf = KalmanTrajectoryFilter()
         e0, n0, u0 = _enu_from_latlon(lat0, lon0, alt0, lat0, lon0, alt0)
-        kf._reset((e0, n0, u0))
+        alt1 = alts[1] if not np.isnan(alts[1]) else alt0
+        e1, n1, u1 = _enu_from_latlon(lats[1], lons[1], alt1, lat0, lon0, alt0)
+        dt01 = times[1] - times[0]
+        if dt01 > 0:
+            kf._reset_with_velocity((e0, n0, u0),
+                                    ((e1 - e0) / dt01, (n1 - n0) / dt01, (u1 - u0) / dt01))
+        else:
+            kf._reset((e0, n0, u0))
 
         smoothed_lat = np.empty(n_rows)
         smoothed_lon = np.empty(n_rows)

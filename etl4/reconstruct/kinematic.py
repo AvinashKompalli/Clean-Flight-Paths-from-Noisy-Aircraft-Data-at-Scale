@@ -21,7 +21,11 @@ MAX_ALT_RATE_MPS    = 50.0
 MAX_TURN_RATE_DPS   = 30.0
 
 
-def segment_kinematic(df: pd.DataFrame, gap_s: float = GAP_THRESHOLD_S) -> pd.DataFrame:
+def segment_kinematic(df: pd.DataFrame, gap_s: float = GAP_THRESHOLD_S,
+                      break_on_jump: bool = True) -> pd.DataFrame:
+    """Segment flights on kinematic signals. `break_on_jump=False` lets the
+    Kalman gate in Method C decide what to do with jump rows instead of
+    isolating them as singleton flights."""
     if df.empty:
         df["flight_id"] = pd.Series(dtype="string")
         return df
@@ -37,7 +41,10 @@ def segment_kinematic(df: pd.DataFrame, gap_s: float = GAP_THRESHOLD_S) -> pd.Da
     break_call   = (g["callsign"].shift(1).ne(df["callsign"]) & df["callsign"].notna()).fillna(False)
     break_call   = break_call & ~dt.isna()   # first row per aircraft doesn't count
 
-    new_flight = (break_time | break_jump | break_alt | break_turn | break_call).astype(bool)
+    boundary = break_time | break_alt | break_turn | break_call
+    if break_on_jump:
+        boundary = boundary | break_jump
+    new_flight = boundary.fillna(True).astype(bool)
     seq = new_flight.groupby(df["icao24"]).cumsum().fillna(0).astype("int64")
     df["flight_id"] = df["icao24"].astype(str) + "_" + seq.astype(str)
     return df

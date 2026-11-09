@@ -78,9 +78,13 @@ def main():
     step = sc["step_seconds"]
     day0 = int(pd.Timestamp(a.date, tz="UTC").timestamp())
 
+    # Real ADS-B: when one flight ends and another on the same airframe
+    # begins, there is a dark period. A 45-min inter-flight gap trips every
+    # segmenter's 30-min `break_time` so hours do not merge into one flight.
+    BETWEEN_FLIGHT_GAP_S = 45 * 60
     clean_parts = []
     for h in range(a.hours):
-        t0 = day0 + h * 3600
+        t0 = day0 + h * (3600 + BETWEEN_FLIGHT_GAP_S)
         n_steps = 3600 // step
         frames = []
         for i in range(sc["n_aircraft"]):
