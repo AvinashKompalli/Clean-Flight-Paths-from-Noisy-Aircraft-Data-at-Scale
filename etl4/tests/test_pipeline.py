@@ -212,3 +212,125 @@ def test_run_experiment_time_gap_end_to_end(synth_bronze, tmp_path, monkeypatch)
     assert m["rows_out"] > 0
     assert m["n_flights"] > 0
     assert "wall_s" in m
+
+
+# --- crash-safety and strengthened invariants (Round 7) -------------------
+
+def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
+    """Guards plan.md §13 crash-safety: matrix.csv must be persisted after
+    every (method, noise) cell, so a kill on cell N preserves cells 1..N-1."""
+    import importlib
+    import sys as _sys
+    rm = importlib.import_module("etl4.bench.run_matrix")
+
+    csv_path = tmp_path / "matrix.csv"
+    calls = {"n": 0}
+
+    def fake_run(bronze, method, truth=None, noise="N0", source="synthetic"):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("simulated crash on cell 2")
+        return {"wall_s": 1.23, "n_flights": 10, "n_deviations": 0,
+                "continuity": 0.95, "rows_out": 1000}
+
+    monkeypatch.setattr(rm, "run_experiment", fake_run)
+    monkeypatch.setattr(rm, "_load", lambda p: pd.DataFrame(
+        {"icao24": ["a"], "time": [0], "lat": [0.0], "lon": [0.0]}))
+    monkeypatch.setattr(rm, "MATRIX_CSV", csv_path)
+    monkeypatch.setattr(_sys, "argv", [
+        "run_matrix.py", "--bronze", str(tmp_path),
+        "--methods", "time_gap", "kinematic", "--profiles", "N0",
+    ])
+    with pytest.raises(RuntimeError):
+        rm.main()
+    assert csv_path.exists(), "matrix.csv missing after crash — crash-safety broken"
+    rows = pd.read_csv(csv_path)
+    assert len(rows) == 1, f"expected 1 persisted cell, got {len(rows)}"
+    assert rows.iloc[0]["method"] == "time_gap"
+
+
+def test_kinematic_na_safety_strong():
+    """Guards plan.md §17.4: segmentation must not raise on BooleanDtype/Int64
+    NAs in position_jump, alt_rate, turn_rate. Without `.fillna()` before the
+    boolean OR chain, pandas raises TypeError: boolean value of NA is ambiguous."""
+    n = 5
+    df = pd.DataFrame({
+        "icao24": ["abc123"] * n,
+        "time": [1000, 1010, 1020, 1030, 1040],
+        "lat": [13.0] * n,
+        "lon": [77.0, 77.001, 77.002, 77.003, 77.004],
+        "callsign": ["X"] * n,
+        "position_jump": pd.array([False, None, True, False, None], dtype="boolean"),
+        "dt": pd.array([None, 10.0, 10.0, 10.0, 10.0], dtype="Float64"),
+        "alt_rate": pd.array([0.0, None, 0.0, 0.0, 0.0], dtype="Float64"),
+        "turn_rate": pd.array([0.0, 0.0, None, 0.0, 0.0], dtype="Float64"),
+    })
+    out = segment_kinematic(df, break_on_jump=True)
+    assert "flight_id" in out.columns
+    assert out["flight_id"].notna().all()
+    assert len(out) == n
+    assert out["flight_id"].nunique() >= 2  # at least one break on the NA-containing jump
+
+
+def test_clean_coerces_icao24_to_string_dtype():
+    """Guards plan.md §0.6 / CLAUDE.md §2.6: icao24 must END UP pandas `string`
+    through project_raw and clean, regardless of input dtype. Pandas can
+    silently parse a hex string like `0a1b2c` to int `10534700`, which
+    cross-joins airframes — project_raw must FORCE string.
+
+    Two shapes: (1) input is already `StringDtype` (preservation); (2) input
+    is `object` dtype (forcing). Both must end in StringDtype.
+    """
+    def _fixture(icao_col):
+        return pd.DataFrame({
+            "icao24":        icao_col,
+            "time":          [1_000_000, 1_000_010],
+            "lat":           [10.0, 11.0], "lon": [20.0, 21.0],
+            "velocity":      [200.0, 200.0], "heading": [0.0, 0.0], "vertrate": [0.0, 0.0],
+            "callsign":      ["TST001", "TST001"], "onground": [False, False],
+            "alert":         [False, False], "spi": [False, False], "squawk": ["1200", "1200"],
+            "baroaltitude":  [10000.0, 10000.0], "geoaltitude": [10030.0, 10030.0],
+            "lastposupdate": [1_000_000.0, 1_000_010.0],
+            "lastcontact":   [1_000_000.0, 1_000_010.0],
+            "hour":          [1_000_000, 1_000_000],
+        })
+
+    # 1. preservation: StringDtype in -> StringDtype out
+    df_str = _fixture(pd.array(["abc123", "def456"], dtype="string"))
+    projected_str = project_raw(df_str, source="synthetic")
+    assert isinstance(projected_str["icao24"].dtype, pd.StringDtype)
+    cleaned_str, _ = clean(projected_str)
+    assert isinstance(cleaned_str["icao24"].dtype, pd.StringDtype)
+
+    # 2. forcing: object-dtype hex input -> StringDtype output
+    df_obj = _fixture(pd.Series(["0a1b2c", "ff0000"], dtype="object"))
+    projected_obj = project_raw(df_obj, source="synthetic")
+    assert isinstance(projected_obj["icao24"].dtype, pd.StringDtype), \
+        f"project_raw did not coerce object-dtype icao24 to string (got {projected_obj['icao24'].dtype})"
+    # original hex form preserved — no silent int parse
+    assert list(projected_obj["icao24"]) == ["0a1b2c", "ff0000"]
+
+
+def test_deviations_duration_filter_30s_no_fire_90s_fire():
+    """Guards plan.md §9 / deviations.py `MIN_EVENT_DURATION_S=60`: a 30-s
+    off-route spike must NOT produce an event; a 90-s run must."""
+    import numpy as np
+
+    def _flight(fid, bump_rows):
+        n = 30
+        t = np.arange(n, dtype=int) * 10        # 0..290 s
+        lat = np.full(n, 13.0, dtype=float)
+        lon = np.linspace(77.0, 78.0, n)
+        for i in bump_rows:
+            lat[i] = 15.0                        # ~222 km off-route -> >> 5 km threshold
+        return pd.DataFrame({"icao24": ["abc123"] * n, "flight_id": [fid] * n,
+                             "time": t, "lat": lat, "lon": lon})
+
+    short = _flight("F_30", [15, 16, 17, 18])             # 4 rows span 30 s
+    long_ = _flight("F_90", list(range(15, 25)))          # 10 rows span 90 s
+    df = pd.concat([short, long_], ignore_index=True)
+    events = detect_deviations(df, use_kalman_residual=False)
+    assert (events["flight_id"] == "F_30").sum() == 0, "30-s spike fired an event"
+    assert (events["flight_id"] == "F_90").sum() == 1, "90-s run did not fire"
+    row = events[events["flight_id"] == "F_90"].iloc[0]
+    assert row["end_time"] - row["start_time"] >= 60
