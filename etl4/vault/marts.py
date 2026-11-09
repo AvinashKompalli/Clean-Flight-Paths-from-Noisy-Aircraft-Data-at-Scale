@@ -98,10 +98,14 @@ def build_fact_flight() -> pd.DataFrame:
 
 def build_fact_trajectory_enriched(dim_aircraft: pd.DataFrame) -> pd.DataFrame:
     """Left-join state observations onto dim_aircraft so every row carries
-    typecode/registration when available from the flightlist join."""
+    typecode/registration when available from the flightlist join.
+
+    Keeps callsign from the state observation so downstream UIs can filter
+    the trajectory by the live radio callsign (changes mid-day per aircraft).
+    """
     sat = _read("sat_state_observation")
     cols = ["hk_aircraft", "icao24", "time", "lat", "lon", "baroaltitude",
-            "velocity", "heading", "typecode", "registration"]
+            "velocity", "heading", "callsign", "typecode", "registration"]
     if sat.empty:
         return pd.DataFrame(columns=cols)
     if dim_aircraft.empty:
@@ -110,6 +114,8 @@ def build_fact_trajectory_enriched(dim_aircraft: pd.DataFrame) -> pd.DataFrame:
         dim_aircraft[["hk_aircraft", "icao24", "registration", "typecode"]],
         on="hk_aircraft", how="left",
     )
+    # Normalise callsign spacing so filter dropdowns don't show padding dupes.
+    enriched["callsign"] = enriched["callsign"].astype("string").str.strip()
     return enriched[cols]
 
 

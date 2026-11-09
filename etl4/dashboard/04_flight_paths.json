@@ -1,0 +1,281 @@
+{
+  "uid": "etl4-flight-paths",
+  "title": "ETL4 - Flight Paths",
+  "description": "Interactive map of enriched aircraft trajectories from the Data Vault marts. Filter by aircraft type, callsign, or ICAO24 and the map, altitude profile and summary table update together.",
+  "tags": ["etl4", "vault", "geomap", "trajectory"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "refresh": "",
+  "timepicker": { "hidden": true },
+  "templating": {
+    "list": [
+      {
+        "name": "typecode",
+        "label": "Aircraft type (ICAO code)",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "Postgres" },
+        "definition": "SELECT DISTINCT typecode FROM dim_aircraft WHERE typecode IS NOT NULL AND typecode <> '' ORDER BY typecode",
+        "query": "SELECT DISTINCT typecode FROM dim_aircraft WHERE typecode IS NOT NULL AND typecode <> '' ORDER BY typecode",
+        "multi": true,
+        "includeAll": false,
+        "current": { "selected": true, "text": ["B738"], "value": ["B738"] },
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "callsign",
+        "label": "Callsign",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "Postgres" },
+        "definition": "SELECT DISTINCT callsign FROM fact_trajectory_enriched WHERE callsign IS NOT NULL AND callsign <> '' AND typecode IN (${typecode:sqlstring}) ORDER BY callsign LIMIT 500",
+        "query": "SELECT DISTINCT callsign FROM fact_trajectory_enriched WHERE callsign IS NOT NULL AND callsign <> '' AND typecode IN (${typecode:sqlstring}) ORDER BY callsign LIMIT 500",
+        "multi": true,
+        "includeAll": false,
+        "current": { "selected": false, "text": [], "value": [] },
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "icao24",
+        "label": "ICAO24 (optional)",
+        "type": "textbox",
+        "current": { "text": "", "value": "" },
+        "query": ""
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "geomap",
+      "title": "Flight paths on world map — route per callsign",
+      "description": "Each selected callsign draws its own line, sorted by time. Hover a point for icao24 / typecode / altitude.",
+      "gridPos": { "x": 0, "y": 0, "w": 16, "h": 14 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "Postgres" },
+          "format": "table",
+          "rawSql": "SELECT time AS \"time\", lat, lon, callsign, icao24, COALESCE(typecode,'?') AS typecode, baroaltitude FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) AND ('${icao24}' = '' OR icao24 = '${icao24}') ORDER BY callsign, time"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": { "fields": ["callsign"], "keepFields": true, "naming": { "asLabels": false } }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "view": { "id": "fit", "lat": 0, "lon": 0, "zoom": 2, "allLayers": true },
+        "controls": {
+          "showZoom": true, "mouseWheelZoom": true, "showAttribution": true,
+          "showScale": true, "showMeasure": false, "showDebug": false
+        },
+        "basemap": { "type": "osm-standard", "config": {} },
+        "layers": [
+          {
+            "type": "route",
+            "name": "Trajectory",
+            "config": {
+              "style": {
+                "color": { "fixed": "#d14" },
+                "lineWidth": 2,
+                "opacity": 0.8,
+                "size": { "fixed": 2 }
+              },
+              "arrow": 0
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "lat",
+              "longitude": "lon"
+            },
+            "tooltip": true
+          },
+          {
+            "type": "markers",
+            "name": "Start / end markers",
+            "config": {
+              "style": {
+                "color": { "fixed": "#2a7ae2" },
+                "size": { "fixed": 4 },
+                "opacity": 0.6,
+                "symbol": { "fixed": "img/icons/marker/circle.svg", "mode": "fixed" }
+              }
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "lat",
+              "longitude": "lon"
+            },
+            "tooltip": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Selected flights — summary",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 7 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT callsign, MIN(icao24) AS icao24, MIN(typecode) AS typecode, COUNT(*) AS points, to_timestamp(MIN(time)) AS \"first_seen\", to_timestamp(MAX(time)) AS \"last_seen\", MAX(time) - MIN(time) AS duration_s, ROUND(AVG(baroaltitude)::numeric, 1) AS avg_alt_m FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) GROUP BY callsign ORDER BY MIN(time)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "avg_alt_m" },
+            "properties": [{ "id": "unit", "value": "lengthm" }] },
+          { "matcher": { "id": "byName", "options": "duration_s" },
+            "properties": [{ "id": "unit", "value": "s" }] }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Altitude profile — one line per callsign",
+      "gridPos": { "x": 16, "y": 7, "w": 8, "h": 7 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT to_timestamp(time) AS \"time\", callsign AS metric, baroaltitude AS value FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) ORDER BY callsign, time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "lengthm",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Observations (filtered)",
+      "gridPos": { "x": 0, "y": 14, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS n FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) AND ('${icao24}' = '' OR icao24 = '${icao24}')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "#2a7ae2" } },
+        "overrides": []
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Unique aircraft (icao24)",
+      "gridPos": { "x": 6, "y": 14, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COUNT(DISTINCT icao24) AS n FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "#33a02c" } },
+        "overrides": []
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Mean altitude",
+      "gridPos": { "x": 12, "y": 14, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT ROUND(AVG(baroaltitude)::numeric, 1) AS m FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) AND baroaltitude IS NOT NULL"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "lengthm", "color": { "mode": "fixed", "fixedColor": "#ff7f00" } },
+        "overrides": []
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Ground speed, median (m/s)",
+      "gridPos": { "x": 18, "y": 14, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "Postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY velocity) AS v FROM fact_trajectory_enriched WHERE callsign IN (${callsign:sqlstring}) AND velocity IS NOT NULL"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "velocityms", "color": { "mode": "fixed", "fixedColor": "#9467bd" } },
+        "overrides": []
+      },
+      "options": {
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
+    }
+  ]
+}
