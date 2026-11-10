@@ -45,22 +45,23 @@ def _run(cmd: list[str]) -> int:
 def _s3(date: str) -> dict:
     out = ROOT / "data" / "bronze" / "raw_states" / f"date={date}"
     before = _du_bytes(out)
-    rc = _run([sys.executable, "etl4/screpper.py",
-               "--repo", "opensky",
-               "--start-date", date, "--end-date", date])
-    if rc:
-        raise SystemExit(rc)
+    for action in ("--download", "--convert"):
+        rc = _run([sys.executable, "etl4/screpper.py",
+                   "--repo", "s3", action,
+                   "--start-date", date, "--end-date", date])
+        if rc:
+            raise RuntimeError(f"screpper {action} exited {rc}")
     return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
 
 
 def _zenodo(latest: bool) -> dict:
     out = ROOT / "data" / "bronze" / "flightlists"
     before = _du_bytes(out)
-    cmd = [sys.executable, "etl4/screpper.py", "--repo", "zenodo"]
+    cmd = [sys.executable, "etl4/screpper.py", "--repo", "zenodo", "--download"]
     if latest:
         cmd += ["--latest"]
     if _run(cmd):
-        raise SystemExit(1)
+        raise RuntimeError("screpper zenodo download failed")
     return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
 
 
@@ -71,7 +72,7 @@ def _synthetic(date: str) -> dict:
     out_b = ROOT / "etl4" / "data" / "bronze" / "raw_states" / f"date={date}"
     before_a, before_b = _du_bytes(out_a), _du_bytes(out_b)
     if _run([sys.executable, "etl4/ingest/synthetic.py", "--date", date]):
-        raise SystemExit(1)
+        raise RuntimeError("synthetic exited non-zero")
     out = out_a if _du_bytes(out_a) > before_a else out_b
     before = before_a if out is out_a else before_b
     return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
@@ -81,7 +82,7 @@ def _replay(speed: str, limit: int) -> dict:
     cmd = [sys.executable, "etl4/ingest/replay_producer.py",
            "--speed", speed, "--limit", str(limit)]
     if _run(cmd):
-        raise SystemExit(1)
+        raise RuntimeError("replay producer exited non-zero")
     return {"rows_out": limit, "bytes_out": 0}
 
 

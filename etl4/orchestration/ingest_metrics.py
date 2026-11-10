@@ -34,10 +34,10 @@ def ingest_run(source: str, pattern: str, extras: dict | None = None):
             (source, pattern, json.dumps(rec["extras"])),
         )
         run_id = cur.fetchone()[0]
+    status, err = "ok", None
     try:
         yield rec
-        status, err = "ok", None
-    except Exception:
+    except BaseException:
         status, err = "error", traceback.format_exc()
         raise
     finally:
