@@ -1,0 +1,119 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "description": "Side-by-side characterisation of every ingest path (OpenSky S3, Zenodo, synthetic, bronze replay, OpenSky REST live). Backed by Postgres ingest_runs (batch) and Prometheus (streaming). NOT a throughput race -- see etl4/docs/ingest_patterns.md.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Throughput by ingest path (rows / wall-second, last 30d)",
+      "type": "bargauge",
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"unit": "rowsps", "decimals": 1, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "green", "value": 1000}, {"color": "orange", "value": 100000}]}}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "postgres", "uid": "Postgres"},
+        "format": "table",
+        "rawSql": "SELECT source || ' (' || pattern || ')' AS metric, CASE WHEN SUM(wall_seconds) > 0 THEN SUM(rows_out)::double precision / SUM(wall_seconds) ELSE 0 END AS value FROM ingest_runs WHERE started_at > now() - interval '30 days' AND status = 'ok' GROUP BY source, pattern ORDER BY value DESC"
+      }]
+    },
+    {
+      "title": "Bytes ingested by path (last 30d)",
+      "type": "bargauge",
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
+      "fieldConfig": {"defaults": {"unit": "decbytes", "color": {"mode": "palette-classic"}}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "postgres", "uid": "Postgres"},
+        "format": "table",
+        "rawSql": "SELECT source AS metric, SUM(bytes_out) AS value FROM ingest_runs WHERE started_at > now() - interval '30 days' AND status = 'ok' GROUP BY source ORDER BY value DESC"
+      }]
+    },
+    {
+      "title": "Freshness -- minutes since last successful run",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "horizontal", "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "m", "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1440}, {"color": "red", "value": 10080}]}}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "postgres", "uid": "Postgres"},
+        "format": "table",
+        "rawSql": "SELECT source AS metric, EXTRACT(EPOCH FROM (now() - MAX(finished_at))) / 60.0 AS value FROM ingest_runs WHERE status = 'ok' GROUP BY source ORDER BY value"
+      }]
+    },
+    {
+      "title": "Failure rate by path (last 30d)",
+      "type": "stat",
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "horizontal", "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2, "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.2}]}}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "postgres", "uid": "Postgres"},
+        "format": "table",
+        "rawSql": "SELECT source AS metric, SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::double precision / NULLIF(COUNT(*), 0) AS value FROM ingest_runs WHERE started_at > now() - interval '30 days' GROUP BY source"
+      }]
+    },
+    {
+      "title": "Live producer -- records/sec (Prometheus)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "fieldConfig": {"defaults": {"unit": "rowsps", "color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "pointSize": 5}}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "prometheus", "uid": "Prometheus"},
+        "expr": "rate(records_sent_total[5m])",
+        "legendFormat": "records_sent/s"
+      }, {
+        "refId": "B",
+        "datasource": {"type": "prometheus", "uid": "Prometheus"},
+        "expr": "rate(records_dropped_total[5m])",
+        "legendFormat": "records_dropped/s"
+      }]
+    },
+    {
+      "title": "Last 20 ingest runs",
+      "type": "table",
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "id": 6,
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "fieldConfig": {"defaults": {"custom": {"align": "auto"}}, "overrides": [{"matcher": {"id": "byName", "options": "status"}, "properties": [{"id": "custom.cellOptions", "value": {"type": "color-background"}}, {"id": "mappings", "value": [{"type": "value", "options": {"ok": {"color": "green", "index": 0}, "error": {"color": "red", "index": 1}, "running": {"color": "blue", "index": 2}}}]}]}, {"matcher": {"id": "byName", "options": "wall_s"}, "properties": [{"id": "unit", "value": "s"}, {"id": "decimals", "value": 1}]}, {"matcher": {"id": "byName", "options": "bytes_out"}, "properties": [{"id": "unit", "value": "decbytes"}]}]},
+      "targets": [{
+        "refId": "A",
+        "datasource": {"type": "postgres", "uid": "Postgres"},
+        "format": "table",
+        "rawSql": "SELECT started_at, source, pattern, wall_seconds AS wall_s, rows_out, bytes_out, status FROM ingest_runs ORDER BY started_at DESC LIMIT 20"
+      }]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["etl4", "ingest", "comparison"],
+  "templating": {"list": []},
+  "time": {"from": "now-7d", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ETL4 Ingest Comparison",
+  "uid": "etl4-ingest-comparison",
+  "version": 1,
+  "weekStart": ""
+}

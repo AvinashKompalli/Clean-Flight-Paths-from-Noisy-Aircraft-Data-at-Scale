@@ -70,3 +70,22 @@ CREATE INDEX IF NOT EXISTS idx_fact_traj_call    ON fact_trajectory_enriched(cal
 CREATE INDEX IF NOT EXISTS idx_fact_traj_icao    ON fact_trajectory_enriched(icao24);
 CREATE INDEX IF NOT EXISTS idx_fact_traj_time    ON fact_trajectory_enriched(time);
 CREATE INDEX IF NOT EXISTS idx_fact_traj_type    ON fact_trajectory_enriched(typecode);
+
+-- Ingest-path telemetry. One row per ingest invocation (screpper S3, screpper
+-- zenodo, synthetic generator, replay producer, nightly vault rebuild).
+-- Fuels dashboard 05_ingest_comparison.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    run_id         SERIAL PRIMARY KEY,
+    source         TEXT NOT NULL,         -- 's3'|'zenodo'|'synthetic'|'replay'|'vault_rebuild'
+    pattern        TEXT NOT NULL,         -- 'batch'|'stream'|'generative'
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ,
+    wall_seconds   DOUBLE PRECISION,
+    rows_out       BIGINT DEFAULT 0,
+    bytes_out      BIGINT DEFAULT 0,
+    status         TEXT DEFAULT 'running', -- 'running'|'ok'|'error'
+    error_message  TEXT,
+    extras         JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_source  ON ingest_runs(source);
+CREATE INDEX IF NOT EXISTS idx_ingest_started ON ingest_runs(started_at DESC);
