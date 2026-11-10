@@ -65,10 +65,15 @@ def _zenodo(latest: bool) -> dict:
 
 
 def _synthetic(date: str) -> dict:
-    out = ROOT / "data" / "bronze" / "raw_states" / f"date={date}"
-    before = _du_bytes(out)
+    # synthetic.py resolves bronze under etl4/data/, the rest of the project
+    # under data/. Prefer the one that actually exists after the run.
+    out_a = ROOT / "data" / "bronze" / "raw_states" / f"date={date}"
+    out_b = ROOT / "etl4" / "data" / "bronze" / "raw_states" / f"date={date}"
+    before_a, before_b = _du_bytes(out_a), _du_bytes(out_b)
     if _run([sys.executable, "etl4/ingest/synthetic.py", "--date", date]):
         raise SystemExit(1)
+    out = out_a if _du_bytes(out_a) > before_a else out_b
+    before = before_a if out is out_a else before_b
     return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
 
 
