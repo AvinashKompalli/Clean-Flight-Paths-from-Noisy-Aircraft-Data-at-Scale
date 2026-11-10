@@ -3,11 +3,13 @@
 Keeps existing ingest scripts unchanged — this wrapper owns the measurement
 so every path emits the same metric shape to the `ingest_runs` table.
 
+Real sources only. synthetic.py stays on disk for unit-test fixtures but
+is not exposed as an orchestration source.
+
 Usage:
-  python -m etl4.orchestration.ingest_runner --source s3       --date 2022-06-27
-  python -m etl4.orchestration.ingest_runner --source zenodo   --latest
-  python -m etl4.orchestration.ingest_runner --source synthetic --date 2022-06-27
-  python -m etl4.orchestration.ingest_runner --source replay   --speed max --limit 50000
+  python -m etl4.orchestration.ingest_runner --source s3     --date 2022-06-27
+  python -m etl4.orchestration.ingest_runner --source zenodo --latest
+  python -m etl4.orchestration.ingest_runner --source replay --speed max --limit 50000
 """
 from __future__ import annotations
 
@@ -30,11 +32,13 @@ def _du_bytes(path: Path) -> int:
 
 
 def _rows_in_tree(path: Path) -> int:
+    """Row count across all parquet files under `path`. Schema-agnostic —
+    reads only footer metadata, no column load."""
     if not path.exists():
         return 0
-    import pandas as pd
+    import pyarrow.parquet as pq
     files = [path] if path.is_file() else sorted(path.rglob("*.parquet"))
-    return sum(len(pd.read_parquet(f, columns=["time"])) for f in files)
+    return sum(pq.ParquetFile(f).metadata.num_rows for f in files)
 
 
 def _run(cmd: list[str]) -> int:
@@ -55,27 +59,19 @@ def _s3(date: str) -> dict:
 
 
 def _zenodo(latest: bool) -> dict:
-    out = ROOT / "data" / "bronze" / "flightlists"
-    before = _du_bytes(out)
+    raw   = ROOT / "data" / "raw"    / "opensky_flightlists"
+    bronze = ROOT / "data" / "bronze" / "flightlists"
+    raw_before    = _du_bytes(raw)
+    bronze_before = _du_bytes(bronze)
     cmd = [sys.executable, "etl4/screpper.py", "--repo", "zenodo", "--download"]
     if latest:
         cmd += ["--latest"]
     if _run(cmd):
         raise RuntimeError("screpper zenodo download failed")
-    return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
-
-
-def _synthetic(date: str) -> dict:
-    # synthetic.py resolves bronze under etl4/data/, the rest of the project
-    # under data/. Prefer the one that actually exists after the run.
-    out_a = ROOT / "data" / "bronze" / "raw_states" / f"date={date}"
-    out_b = ROOT / "etl4" / "data" / "bronze" / "raw_states" / f"date={date}"
-    before_a, before_b = _du_bytes(out_a), _du_bytes(out_b)
-    if _run([sys.executable, "etl4/ingest/synthetic.py", "--date", date]):
-        raise RuntimeError("synthetic exited non-zero")
-    out = out_a if _du_bytes(out_a) > before_a else out_b
-    before = before_a if out is out_a else before_b
-    return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
+    if _run([sys.executable, "-m", "etl4.vault.bronze_flightlists"]):
+        raise RuntimeError("bronze_flightlists conversion failed")
+    return {"rows_out":  _rows_in_tree(bronze),
+            "bytes_out": _du_bytes(raw) - raw_before}
 
 
 def _replay(speed: str, limit: int) -> dict:
@@ -89,15 +85,14 @@ def _replay(speed: str, limit: int) -> dict:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", required=True,
-                   choices=["s3", "zenodo", "synthetic", "replay"])
+                   choices=["s3", "zenodo", "replay"])
     p.add_argument("--date")
     p.add_argument("--latest", action="store_true")
     p.add_argument("--speed", default="max")
     p.add_argument("--limit", type=int, default=50000)
     a = p.parse_args()
 
-    pattern = {"s3": "batch", "zenodo": "batch",
-               "synthetic": "generative", "replay": "stream"}[a.source]
+    pattern = {"s3": "batch", "zenodo": "batch", "replay": "stream"}[a.source]
 
     with ingest_run(a.source, pattern,
                     extras={"date": a.date, "speed": a.speed,
@@ -106,8 +101,6 @@ def main():
             out = _s3(a.date)
         elif a.source == "zenodo":
             out = _zenodo(a.latest)
-        elif a.source == "synthetic":
-            out = _synthetic(a.date)
         else:
             out = _replay(a.speed, a.limit)
         rec["rows_out"]  = out["rows_out"]
