@@ -1,3 +1,51 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:74d7be0436fa46974db7d062cfdd3e25d93d60acfa739778fc8646efdc51a6ac
-size 2358
+icao,iata,name,lat,lon
+VABB,BOM,Mumbai Chhatrapati Shivaji,19.0887,72.8679
+VIDP,DEL,Delhi Indira Gandhi,28.5665,77.1031
+VOBL,BLR,Bengaluru Kempegowda,13.1986,77.7066
+VOHS,HYD,Hyderabad Rajiv Gandhi,17.2403,78.4294
+VOMM,MAA,Chennai International,12.9941,80.1709
+VECC,CCU,Kolkata Netaji,22.6547,88.4467
+VAAH,AMD,Ahmedabad Sardar Vallabhbhai,23.0772,72.6347
+VOCC,COK,Cochin International,10.1520,76.4019
+VOTV,TRV,Trivandrum International,8.4821,76.9200
+VOGO,GOI,Goa Dabolim,15.3808,73.8314
+VOCI,CJB,Coimbatore International,11.0300,77.0433
+VOPB,IXE,Mangalore International,12.9613,74.8900
+VILK,LKO,Lucknow Amausi,26.7606,80.8893
+VAJJ,JAI,Jaipur International,26.8242,75.8122
+VEBD,BDQ,Vadodara Harni,22.3362,73.2263
+VEPT,PAT,Patna Jay Prakash Narayan,25.5913,85.0880
+VARP,RPR,Raipur Swami Vivekananda,21.1804,81.7388
+VISR,SXR,Srinagar International,33.9871,74.7742
+VOTR,TRZ,Tiruchirappalli International,10.7654,78.7097
+VIJP,DIU,Diu International,20.7132,70.9211
+VIAR,ATQ,Amritsar Guru Ram Das,31.7096,74.7973
+VOMD,IXM,Madurai International,9.8345,78.0934
+VEBS,BBI,Bhubaneswar Biju Patnaik,20.2444,85.8178
+VAPO,PNQ,Pune Lohegaon,18.5820,73.9197
+VANP,NAG,Nagpur Dr Babasaheb Ambedkar,21.0922,79.0472
+VIBN,VNS,Varanasi Lal Bahadur Shastri,25.4524,82.8593
+VEIM,IMF,Imphal Bir Tikendrajit,24.7600,93.8967
+VEGT,GAU,Guwahati Lokpriya Gopinath Bordoloi,26.1061,91.5859
+VEMR,IXR,Ranchi Birsa Munda,23.3143,85.3217
+VAID,IDR,Indore Devi Ahilyabai Holkar,22.7217,75.8011
+EGLL,LHR,London Heathrow,51.4700,-0.4543
+EDDF,FRA,Frankfurt am Main,50.0379,8.5622
+LFPG,CDG,Paris Charles de Gaulle,49.0097,2.5479
+EHAM,AMS,Amsterdam Schiphol,52.3105,4.7683
+OMDB,DXB,Dubai International,25.2528,55.3644
+OTHH,DOH,Doha Hamad,25.2731,51.6080
+WSSS,SIN,Singapore Changi,1.3644,103.9915
+VHHH,HKG,Hong Kong International,22.3080,113.9185
+RJTT,HND,Tokyo Haneda,35.5494,139.7798
+KJFK,JFK,New York John F. Kennedy,40.6413,-73.7781
+KLAX,LAX,Los Angeles International,33.9416,-118.4085
+KORD,ORD,Chicago O'Hare,41.9742,-87.9073
+KATL,ATL,Atlanta Hartsfield-Jackson,33.6407,-84.4277
+YSSY,SYD,Sydney Kingsford Smith,-33.9399,151.1753
+NZAA,AKL,Auckland International,-37.0082,174.7850
+FACT,CPT,Cape Town International,-33.9715,18.6021
+SBGR,GRU,Sao Paulo Guarulhos,-23.4322,-46.4694
+CYYZ,YYZ,Toronto Pearson,43.6777,-79.6248
+UUEE,SVO,Moscow Sheremetyevo,55.9726,37.4146
+LTFM,IST,Istanbul,41.2753,28.7519
