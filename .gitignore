@@ -8,6 +8,7 @@ __pycache__/
 # IDE / tooling
 .vscode/
 .claude/
+CLAUDE.md
 .DS_Store
 
 # Archives / downloads
