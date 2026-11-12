@@ -38,7 +38,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--bronze", required=True)
     p.add_argument("--truth",  default=None)
-    p.add_argument("--source", default="synthetic", choices=["synthetic", "rest", "s3"])
+    p.add_argument("--source", default="zenodo", choices=["synthetic", "rest", "zenodo"])
     p.add_argument("--profiles", nargs="+", default=NOISE_PROFILES)
     p.add_argument("--methods",  nargs="+", default=METHODS)
     a = p.parse_args()

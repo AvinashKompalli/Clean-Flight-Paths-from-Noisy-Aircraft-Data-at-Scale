@@ -61,7 +61,7 @@ All pinned at the `>=` baseline below; the pipeline is validated against the lat
 | `prom/node-exporter` | latest | 9100 | Host resource metrics |
 | `apache/kafka` | 3.8.0 | 9092 | KRaft mode (no Zookeeper) |
 | `apache/spark` | 3.5.3 | 7077, 8080, 4040, 8081 | Master + 2 workers (optional; single-node pandas path also works) |
-| `apache/airflow` | 2.9.3-python3.11 | 8085 | Standalone; hosts three DAGs (`opensky_s3_batch`, `zenodo_versioned_pull`, `nightly_vault_rebuild`) |
+| `apache/airflow` | 2.9.3-python3.11 | 8085 | Standalone; hosts three DAGs (`zenodo_versioned_pull`, `opensky_live_stream`, `nightly_vault_rebuild`) |
 
 Spin everything up with:
 ```powershell
@@ -96,10 +96,10 @@ surfaces the five Grafana dashboards as clickable cards.
 ### Option B - one command, headless
 
 ```powershell
-python etl4/run_e2e.py                               # zenodo + N0..N3, ~100 min
-python etl4/run_e2e.py --profiles N0                 # smoke, ~10 min
-python etl4/run_e2e.py --only matrix eval_mart       # just the experiment + mart
-python etl4/run_e2e.py --source s3 --date 2022-06-27 # S3 ingest instead of Zenodo
+python etl4/run_e2e.py                                 # zenodo + N0..N3, ~100 min
+python etl4/run_e2e.py --profiles N0                   # smoke, ~10 min
+python etl4/run_e2e.py --only matrix eval_mart         # just the experiment + mart
+python etl4/run_e2e.py --source live --live-limit 2000 # live REST stream (secondary)
 ```
 
 Stages: `infra schema ingest bronze vault marts sink matrix eval_mart`. Any subset
@@ -108,9 +108,12 @@ via `--only` / `--skip`.
 ### Option C - hand-drive the stages
 
 ```powershell
-python etl4/screpper.py --start-date 2022-06-27 --end-date 2022-06-27 --dry-run
-python etl4/screpper.py --start-date 2022-06-27 --end-date 2022-06-27
-python etl4/bench/run_matrix.py --bronze data/bronze/raw_states --source s3 --profiles N0 N1 N2 N3
+python -m etl4.orchestration.ingest_runner --source zenodo --latest
+python -m etl4.vault.bronze_flightlists
+python -m etl4.vault.raw_vault
+python -m etl4.vault.marts
+python -m etl4.vault.postgres_sink
+python etl4/bench/run_matrix.py --bronze data/bronze/raw_states --source zenodo --profiles N0 N1 N2 N3
 ```
 
 Grafana at <http://localhost:3000> (admin / admin by default) auto-loads all five

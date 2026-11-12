@@ -4,11 +4,14 @@ Keeps existing ingest scripts unchanged — this wrapper owns the measurement
 so every path emits the same metric shape to the `ingest_runs` table.
 
 Real sources only. synthetic.py stays on disk for unit-test fixtures but
-is not exposed as an orchestration source.
+is not exposed as an orchestration source. The OpenSky S3 `data-samples`
+bucket had its `states/` prefix emptied by OpenSky in late 2026, so the
+S3 batch path was retired - live REST (`live_producer`) is the streaming
+secondary now, with Zenodo as the batch primary.
 
 Usage:
-  python -m etl4.orchestration.ingest_runner --source s3     --date 2022-06-27
   python -m etl4.orchestration.ingest_runner --source zenodo --latest
+  python -m etl4.orchestration.ingest_runner --source live   --limit 2000
   python -m etl4.orchestration.ingest_runner --source replay --speed max --limit 50000
 """
 from __future__ import annotations
@@ -46,16 +49,20 @@ def _run(cmd: list[str]) -> int:
     return subprocess.call(cmd, cwd=str(ROOT))
 
 
-def _s3(date: str) -> dict:
-    out = ROOT / "data" / "bronze" / "raw_states" / f"date={date}"
-    before = _du_bytes(out)
-    for action in ("--download", "--convert"):
-        rc = _run([sys.executable, "etl4/screpper.py",
-                   "--repo", "s3", action,
-                   "--start-date", date, "--end-date", date])
-        if rc:
-            raise RuntimeError(f"screpper {action} exited {rc}")
-    return {"rows_out": _rows_in_tree(out), "bytes_out": _du_bytes(out) - before}
+def _live(limit: int, interval: float) -> dict:
+    """Poll the OpenSky REST API and stream `limit` records through Kafka.
+
+    OAuth2 credentials read from env by live_producer itself (OPENSKY_CLIENT_ID /
+    OPENSKY_CLIENT_SECRET): with creds -> 4000 credits/day, otherwise anonymous
+    at 400/day. Interval is the poll period in seconds; 5s with creds, 10s
+    without. Bytes_out is left at 0 because the producer owns the writes and
+    we only measure the record count on exit.
+    """
+    cmd = [sys.executable, "etl4/ingest/live_producer.py",
+           "--limit", str(limit), "--interval", str(interval)]
+    if _run(cmd):
+        raise RuntimeError("live_producer exited non-zero")
+    return {"rows_out": limit, "bytes_out": 0}
 
 
 def _zenodo(latest: bool) -> dict:
@@ -85,22 +92,23 @@ def _replay(speed: str, limit: int) -> dict:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", required=True,
-                   choices=["s3", "zenodo", "replay"])
-    p.add_argument("--date")
+                   choices=["zenodo", "live", "replay"])
     p.add_argument("--latest", action="store_true")
     p.add_argument("--speed", default="max")
     p.add_argument("--limit", type=int, default=50000)
+    p.add_argument("--interval", type=float, default=5.0,
+                   help="live poll period (s); 5 with OAuth creds, 10 without")
     a = p.parse_args()
 
-    pattern = {"s3": "batch", "zenodo": "batch", "replay": "stream"}[a.source]
+    pattern = {"zenodo": "batch", "live": "stream", "replay": "stream"}[a.source]
 
     with ingest_run(a.source, pattern,
-                    extras={"date": a.date, "speed": a.speed,
-                            "limit": a.limit}) as rec:
-        if a.source == "s3":
-            out = _s3(a.date)
-        elif a.source == "zenodo":
+                    extras={"speed": a.speed, "limit": a.limit,
+                            "interval": a.interval}) as rec:
+        if a.source == "zenodo":
             out = _zenodo(a.latest)
+        elif a.source == "live":
+            out = _live(a.limit, a.interval)
         else:
             out = _replay(a.speed, a.limit)
         rec["rows_out"]  = out["rows_out"]

@@ -15,11 +15,11 @@ Stages, in order:
   9. eval_mart     fact_experiment_result mart (pivot of pipeline_runs x eval_results)
 
 Usage:
-  python etl4/run_e2e.py                               # everything
+  python etl4/run_e2e.py                               # everything, zenodo ingest
   python etl4/run_e2e.py --skip infra schema          # resume mid-chain
   python etl4/run_e2e.py --only matrix eval_mart      # just these two
   python etl4/run_e2e.py --profiles N0 N1             # shorter matrix
-  python etl4/run_e2e.py --source s3 --date 2022-06-27  # S3 ingest instead of Zenodo
+  python etl4/run_e2e.py --source live --live-limit 2000  # live REST stream instead
 """
 from __future__ import annotations
 
@@ -61,14 +61,12 @@ def stage_schema():
                     "psql", "-U", "etl4", "-d", "etl4", "-c", sql])
 
 
-def stage_ingest(source: str, date: str | None):
+def stage_ingest(source: str, limit: int):
     cmd = [PY, "-m", "etl4.orchestration.ingest_runner", "--source", source]
-    if source == "s3":
-        if not date:
-            sys.exit("--date is required with --source s3")
-        cmd += ["--date", date]
-    elif source == "zenodo":
+    if source == "zenodo":
         cmd += ["--latest"]
+    elif source == "live":
+        cmd += ["--limit", str(limit)]
     _run("ingest", cmd)
 
 
@@ -90,7 +88,7 @@ def stage_sink():
 
 def stage_matrix(profiles: list[str], bronze: str):
     _run("matrix", [PY, "etl4/bench/run_matrix.py",
-                    "--bronze", bronze, "--source", "s3",
+                    "--bronze", bronze, "--source", "zenodo",
                     "--profiles", *profiles])
 
 
@@ -168,8 +166,10 @@ def stage_eval_mart():
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--source", default="zenodo", choices=["zenodo", "s3"])
-    p.add_argument("--date", help="required with --source s3 (e.g. 2022-06-27)")
+    p.add_argument("--source", default="zenodo", choices=["zenodo", "live"],
+                   help="zenodo (batch, primary) or live (REST stream, secondary)")
+    p.add_argument("--live-limit", type=int, default=2000,
+                   help="record count for --source live")
     p.add_argument("--bronze", default="data/bronze/raw_states",
                    help="bronze tree for the matrix stage")
     p.add_argument("--profiles", nargs="+",
@@ -186,7 +186,7 @@ def main():
 
     if "infra"     in run: stage_infra()
     if "schema"    in run: stage_schema()
-    if "ingest"    in run: stage_ingest(a.source, a.date)
+    if "ingest"    in run: stage_ingest(a.source, a.live_limit)
     if "bronze"    in run: stage_bronze()
     if "vault"     in run: stage_vault()
     if "marts"     in run: stage_marts()

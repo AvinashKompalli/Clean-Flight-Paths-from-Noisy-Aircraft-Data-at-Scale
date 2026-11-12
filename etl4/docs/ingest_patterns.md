@@ -1,6 +1,6 @@
 # Ingest patterns — characterisation, not a leaderboard
 
-This project ships five distinct ingest paths. They exist to **characterise
+This project ships four distinct ingest paths. They exist to **characterise
 different DE patterns** against the same ADS-B dataset — not to race them.
 Throughput numbers below are bounded by factors outside the pipeline
 (API quotas, network egress, dataset size), so read them as shape, not
@@ -8,22 +8,27 @@ ranking.
 
 | # | Source         | Pattern     | Code entrypoint                                           | Typical throughput envelope   | Bounded by                              | When to reach for it                       |
 |---|----------------|-------------|-----------------------------------------------------------|-------------------------------|-----------------------------------------|--------------------------------------------|
-| 1 | OpenSky REST   | streaming   | `etl4/ingest/live_producer.py`                            | ~4 events / s (steady)        | OpenSky OAuth2 quota                    | Live monitoring, freshness demo            |
-| 2 | OpenSky S3     | batch       | `etl4/screpper.py --repo opensky`                         | ~0.2–1 GB / min (network)     | HTTPS throughput, archive layout        | Historical backfill, full-day slices       |
-| 3 | Zenodo         | batch       | `etl4/screpper.py --repo zenodo`                          | 200 MB per release, bursty    | Zenodo API quota, single HTTPS GET      | Flightlist versioned datasets              |
-| 4 | Synthetic      | generative  | `etl4/ingest/synthetic.py`                                | ~5M rows / min (CPU)          | CPU, numpy allocation                   | Offline testing, ground-truth validation   |
-| 5 | Bronze replay  | stream      | `etl4/ingest/replay_producer.py`                          | ~1M events / min at speed=max | Kafka produce latency, disk read        | Reproducing live pipelines from history    |
+| 1 | Zenodo         | batch (primary)   | `etl4/screpper.py --repo zenodo`                    | 200 MB per release, bursty    | Zenodo API quota, single HTTPS GET      | Flightlist versioned datasets              |
+| 2 | OpenSky REST   | streaming (secondary) | `etl4/ingest/live_producer.py`                  | ~4 events / s (steady)        | OpenSky OAuth2 quota (4000/day or 400 anon) | Live monitoring, freshness demo        |
+| 3 | Synthetic      | generative (test-only)  | `etl4/ingest/synthetic.py`                    | ~5M rows / min (CPU)          | CPU, numpy allocation                   | Unit-test ground-truth fixtures            |
+| 4 | Bronze replay  | stream      | `etl4/ingest/replay_producer.py`                          | ~1M events / min at speed=max | Kafka produce latency, disk read        | Reproducing live pipelines from history    |
+
+Retired: the OpenSky S3 `data-samples` bucket had its `states/` prefix
+emptied by OpenSky in Nov 2026 (only `placeholder.txt` files remain;
+`incident-data/` is unrelated). Historic `ingest_runs` rows with
+`source='s3' status='error'` document the failure before the path was
+dropped.
 
 ## Orchestration
 
-- **Streaming (paths 1, 5)** — native Kafka producers, no external
-  orchestrator. Prometheus scrapes their counters.
-- **Batch (paths 2, 3, 4)** — Apache Airflow 2.9 in standalone mode.
-  Three DAGs:
-  - `opensky_s3_batch` — daily, pulls prior day
+- **Streaming (paths 2, 4)** — native Kafka producers. Prometheus scrapes
+  their counters; the `opensky_live_stream` Airflow DAG exposes a manual
+  trigger for grader demos (no schedule, so the credit budget is yours).
+- **Batch (path 1)** — Apache Airflow 2.9 in standalone mode.
+  Two batch DAGs:
   - `zenodo_versioned_pull` — monthly, pulls latest release
   - `nightly_vault_rebuild` — bronze → vault → marts → Postgres
-- **Vault rebuild (path 6)** — chained BashOperators under Airflow.
+- **Synthetic (path 3)** — pytest fixtures only, no orchestration.
 
 Why Airflow only for batch? Streaming producers are long-running services
 that don't fit a DAG model well; they're owned by systemd / docker, not
