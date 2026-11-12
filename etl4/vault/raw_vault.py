@@ -224,14 +224,34 @@ def build_sat_state_observation(states: pd.DataFrame, load_dt: datetime) -> pd.D
 def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
                     states_dir: Path = STATES_BRONZE,
                     out_dir: Path = VAULT_DIR,
-                    include_states: bool = True) -> dict:
-    """Read bronze, write every raw-vault table. Returns row counts."""
+                    include_states: bool = True,
+                    engine: str = "pandas") -> dict:
+    """Read bronze, write every raw-vault table. Returns row counts.
+
+    engine: "pandas" (default) or "spark". Spark routes only the large
+    sat_state_observation build through PySpark applyInPandas; hubs, links,
+    and the small satellites always stay on pandas.
+    """
     load_dt = datetime.now(timezone.utc)
 
     print("loading bronze ...")
     flightlist = _load_parquet_tree(flightlist_dir)
     print(f"  flightlist rows: {len(flightlist):,}")
-    states = _load_parquet_tree(states_dir) if include_states else pd.DataFrame()
+    # Pandas path reads states in-process; Spark path reads them itself and
+    # only needs the hub inputs (icao24 values) here.
+    if engine == "spark":
+        # Minimal frame for the hub build; the real state read happens in Spark.
+        files = sorted(states_dir.rglob("*.parquet")) if states_dir.exists() else []
+        if files and include_states:
+            import pyarrow.parquet as pq
+            states = pd.concat(
+                [pq.read_table(f, columns=["icao24"]).to_pandas() for f in files],
+                ignore_index=True,
+            )
+        else:
+            states = pd.DataFrame(columns=["icao24"])
+    else:
+        states = _load_parquet_tree(states_dir) if include_states else pd.DataFrame()
     print(f"  state-vector rows: {len(states):,}")
 
     counts = {}
@@ -252,7 +272,19 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
     print("\nbuilding satellites ...")
     counts["sat_aircraft_identity"] = _write(build_sat_aircraft_identity(flightlist, load_dt), "sat_aircraft_identity", out_dir)
     counts["sat_flight_summary"]    = _write(build_sat_flight_summary(flightlist, load_dt),    "sat_flight_summary",    out_dir)
-    counts["sat_state_observation"] = _write(build_sat_state_observation(states, load_dt),     "sat_state_observation", out_dir)
+
+    if engine == "spark" and include_states:
+        print("  sat_state_observation via Spark (applyInPandas on icao24) ...")
+        from etl4.vault.raw_vault_spark import build_sat_state_observation_spark
+        counts["sat_state_observation"] = build_sat_state_observation_spark(
+            states_dir=states_dir,
+            out_dir=out_dir / "sat_state_observation",
+        )
+    else:
+        counts["sat_state_observation"] = _write(
+            build_sat_state_observation(states, load_dt),
+            "sat_state_observation", out_dir,
+        )
     print(f"  sat_aircraft_identity={counts['sat_aircraft_identity']:,}  "
           f"sat_flight_summary={counts['sat_flight_summary']:,}  "
           f"sat_state_observation={counts['sat_state_observation']:,}")
@@ -267,10 +299,13 @@ def main():
     p.add_argument("--out",            default=str(VAULT_DIR))
     p.add_argument("--no-states",      action="store_true",
                    help="skip the state-vector satellite (fast dev loop)")
+    p.add_argument("--engine",         choices=["pandas", "spark"], default="pandas",
+                   help="pandas (default, single-node) or spark (distributed state_observation build)")
     a = p.parse_args()
     build_raw_vault(
         Path(a.flightlist_dir), Path(a.states_dir), Path(a.out),
         include_states=not a.no_states,
+        engine=a.engine,
     )
 
 

@@ -53,4 +53,12 @@ with DAG(
         task_id="load_postgres",
         bash_command=f"cd {PROJECT} && python -m etl4.vault.postgres_sink",
     )
-    ingest >> vault >> marts >> sink
+    # GE suite over bronze + marts. Non-zero exit fails the DAG run.
+    qa = BashOperator(
+        task_id="data_quality_checks",
+        bash_command=(
+            f"cd {PROJECT} && "
+            "python -m etl4.qa.validate --sample 250000"
+        ),
+    )
+    ingest >> vault >> marts >> sink >> qa
