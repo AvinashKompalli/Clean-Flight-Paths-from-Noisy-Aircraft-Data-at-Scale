@@ -18,6 +18,57 @@ Central research question (verbatim from `plan.md` §1):
 - **5 Grafana dashboards** provisioned: ingest throughput, host/Spark system resources, pipeline results, flight paths, ingest-path comparison.
 - **Data Vault 2.0 raw vault + marts** persisted to Postgres (`dim_aircraft`, `dim_airport`, `fact_flight`, `fact_trajectory_enriched`, `fact_experiment_result`).
 
+## Prerequisites
+
+### Host software
+
+| Tool | Version | Notes |
+| --- | --- | --- |
+| Docker Desktop / Engine + Compose v2 | 24.x or newer | Hosts Postgres, Kafka, Grafana, Prometheus, Spark 1+2, Airflow |
+| Python | **3.11** (pinned) | Validated in CI; the maintainer's laptop also runs 3.14.2 successfully |
+| conda or venv | any recent | Only needed to isolate the Python 3.11 env |
+| Git | 2.30+ | Any modern version works |
+| Git LFS | 3.0+ | Only needed for `opensky_live_data.csv`; `airports.csv` is plain text as of commit `ef3a95f` |
+| Bash | from Git for Windows / MSYS | Used by `etl4/infra/create_topics.sh` on Windows |
+| PowerShell 5+ | ships with Windows 11 | Primary shell for the example commands below |
+
+### Python packages (installed via `pip install -r etl4/requirements.txt`)
+
+All pinned at the `>=` baseline below; the pipeline is validated against the latest minor at the time of writing.
+
+| Package | Validated version | Role |
+| --- | --- | --- |
+| `pandas` | 3.0.1 | Core dataframe; nullable dtypes required |
+| `numpy` | 2.4.2 | Vectorised math |
+| `pyarrow` | 24.0.0 | Parquet I/O and footer-only row counts |
+| `psycopg[binary]` | 3.3.8 | Postgres driver (COPY FROM STDIN, autocommit paths) |
+| `confluent-kafka` | 2.x | Producer for the live ingest path |
+| `pyopensky` | 2.x | OpenSky S3 historical ingest wrapper |
+| `prometheus-client` | 0.20+ | Producer-side metrics scraped by Prometheus |
+| `duckdb` | 1.x | Ad-hoc parquet probing in test suite |
+| `python-dotenv` | 1.x | `.env` loader |
+| `pyyaml` | 6.x | Config |
+| `requests` | 2.31+ | OAuth2 refresh for the live REST path |
+| `pytest` | 9.x | Test runner (20 invariants in `etl4/tests/test_pipeline.py`) |
+
+### Dockerised services
+
+| Image | Version | Exposed port | Role |
+| --- | --- | --- | --- |
+| `postgres` | 16 (16.15) | 5432 | Analytics store (marts, `pipeline_runs`, `eval_results`, `ingest_runs`, `fact_experiment_result`) |
+| `grafana/grafana` | 10.4.5 | 3000 | Five auto-provisioned dashboards |
+| `prom/prometheus` | latest | 9090 | Scrapes node-exporter + producer metrics |
+| `prom/node-exporter` | latest | 9100 | Host resource metrics |
+| `apache/kafka` | 3.8.0 | 9092 | KRaft mode (no Zookeeper) |
+| `apache/spark` | 3.5.3 | 7077, 8080, 4040, 8081 | Master + 2 workers (optional; single-node pandas path also works) |
+| `apache/airflow` | 2.9.3-python3.11 | 8085 | Standalone; hosts three DAGs (`opensky_s3_batch`, `zenodo_versioned_pull`, `nightly_vault_rebuild`) |
+
+Spin everything up with:
+```powershell
+docker compose -f etl4/infra/docker-compose.yml up -d
+docker compose -f etl4/infra/airflow-compose.yml up -d    # optional, Airflow DAGs
+```
+
 ## Quickstart
 
 ```powershell
