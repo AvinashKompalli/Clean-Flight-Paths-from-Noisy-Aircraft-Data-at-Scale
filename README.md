@@ -61,7 +61,7 @@ All pinned at the `>=` baseline below; the pipeline is validated against the lat
 | `prom/node-exporter` | latest | 9100 | Host resource metrics |
 | `apache/kafka` | 3.8.0 | 9092 | KRaft mode (no Zookeeper) |
 | `apache/spark` | 3.5.3 | 7077, 8080, 4040, 8081 | Master + 2 workers (optional; single-node pandas path also works) |
-| `apache/airflow` | 2.9.3-python3.11 | 8085 | Standalone; hosts three DAGs (`zenodo_versioned_pull`, `opensky_live_stream`, `nightly_vault_rebuild`) |
+| `apache/airflow` | 2.9.3-python3.11 | 8085 | Standalone; hosts four DAGs (`zenodo_versioned_pull`, `opensky_live_stream`, `daily_incremental_load`, `nightly_vault_rebuild`) |
 
 Spin everything up with:
 ```powershell
