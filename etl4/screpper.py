@@ -18,10 +18,15 @@ Modes:
   --list      List folders and files (S3) or files in the latest Zenodo
               version. Use this first.
   --download  Fetch files. On Zenodo, --latest grabs the newest-dated
-              flightlist in the latest version.
+              flightlist in the latest version; --bulk-pull grabs EVERY
+              file matching --prefix (first-time hydration of ~10 GB).
   --convert   Read the .csv.gz files, write bronze Parquet with an explicit
               schema, and print the volume numbers for the report.
               S3 only: Zenodo flightlists have a different schema.
+
+Zenodo idempotency: a local file is skipped only when its size AND its
+checksum match the record manifest. Zenodo returns the checksum as
+`<algo>:<hex>` (md5 today, sha256 compatible). Mismatches redownload.
 
 Examples:
   python etl4/screpper.py --list
@@ -30,11 +35,12 @@ Examples:
   python etl4/screpper.py --convert --date 2026-10-20 --hours 0
   python etl4/screpper.py --repo zenodo --list
   python etl4/screpper.py --repo zenodo --download --latest
-  python etl4/screpper.py --repo zenodo --download --prefix flightlist_20221
+  python etl4/screpper.py --repo zenodo --download --bulk-pull --prefix flightlist_2022
 """
 import argparse
 import datetime
 import gzip
+import hashlib
 import re
 import sys
 import tarfile
@@ -91,13 +97,14 @@ def session():
     return s
 
 
-def get(s, url, stream=False, params=None):
+def get(s, url, stream=False, params=None, headers=None):
     for attempt in range(MAX_RETRIES):
         try:
-            r = s.get(url, stream=stream, params=params, timeout=90)
-            if r.status_code == 200:
+            r = s.get(url, stream=stream, params=params, headers=headers,
+                      timeout=90)
+            if r.status_code in (200, 206):
                 return r
-            if r.status_code in (403, 404):
+            if r.status_code in (403, 404, 416):
                 raise RuntimeError(f"HTTP {r.status_code} for {r.url}")
             print(f"  HTTP {r.status_code}, retry {attempt + 1}")
         except requests.RequestException as e:
@@ -196,31 +203,41 @@ def match_hour(key, hour):
 # --------------------------------------------------------------------------
 # Download
 # --------------------------------------------------------------------------
-def download(s, url, dest, max_mb):
+def download(s, url, dest, max_mb, quiet=False):
     if dest.exists() and dest.stat().st_size > 0:
         print(f"skip {dest.name}: exists ({dest.stat().st_size / 1e6:.1f} MB)")
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
 
-    r = get(s, url, stream=True)
-    total = int(r.headers.get("content-length", 0))
+    resume_from = tmp.stat().st_size if tmp.exists() else 0
+    headers = {"Range": f"bytes={resume_from}-"} if resume_from else None
+    r = get(s, url, stream=True, headers=headers)
+
+    if resume_from and r.status_code != 206:
+        resume_from = 0
+        tmp.unlink(missing_ok=True)
+
+    cl = int(r.headers.get("content-length", 0))
+    total = cl + resume_from if r.status_code == 206 else cl
     if max_mb and total and total > max_mb * 1e6:
         raise SystemExit(
             f"{dest.name} is {total / 1e6:.0f} MB, over --max-mb. "
             "Raise the limit on purpose, so you do not fill the disk."
         )
-    got = 0
-    with open(tmp, "wb") as f:
+    got = resume_from
+    mode = "ab" if resume_from else "wb"
+    with open(tmp, mode) as f:
         for chunk in r.iter_content(chunk_size=1 << 20):
             f.write(chunk)
             got += len(chunk)
             if max_mb and got > max_mb * 1e6:
-                tmp.unlink(missing_ok=True)
                 raise SystemExit(f"stopped at {got / 1e6:.0f} MB, over --max-mb")
-            print(f"\r  {dest.name}: {got / 1e6:7.1f} MB"
-                  + (f"  {100 * got / total:5.1f}%" if total else ""), end="")
-    print()
+            if not quiet:
+                print(f"\r  {dest.name}: {got / 1e6:7.1f} MB"
+                      + (f"  {100 * got / total:5.1f}%" if total else ""), end="")
+    if not quiet:
+        print()
     tmp.rename(dest)
     time.sleep(DELAY_S)
     return dest
@@ -312,9 +329,10 @@ def zenodo_list(s, concept_id=ZENODO_OPENSKY_FLIGHTLIST_CONCEPT, prefix=""):
         if prefix and prefix not in key:
             continue
         files.append({
-            "key":  key,
-            "size": int(f.get("size", 0)),
-            "url":  f.get("links", {}).get("self", ""),
+            "key":      key,
+            "size":     int(f.get("size", 0)),
+            "url":      f.get("links", {}).get("self", ""),
+            "checksum": f.get("checksum", ""),
         })
     # Sort by filename: the per-month flightlists sort by date naturally.
     files.sort(key=lambda d: d["key"])
@@ -342,14 +360,43 @@ def zenodo_pick_latest_dated(files):
     return dated[-1][1]
 
 
-def zenodo_download(s, files, out_dir, max_mb, dry_run=False):
+_HASH_CHUNK = 1 << 16  # 65 KiB; small enough to stream very large files.
+
+
+def _file_hash(path: Path, algo: str) -> str:
+    """Return the hex digest of `path` using `algo` (as named by hashlib).
+
+    Streams the file in 65 KiB chunks so a 10 GB input never materialises
+    in memory. Returns "" when the algorithm is not available locally;
+    the caller falls back to size-only idempotency.
+    """
+    try:
+        h = hashlib.new(algo)
+    except ValueError:
+        return ""
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_HASH_CHUNK), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def zenodo_download(s, files, out_dir, max_mb, dry_run=False, workers=4):
     """Fetch each file in `files` into out_dir. Idempotent: skip existing.
+
+    Idempotency is size+checksum: a local file is kept only when its byte
+    size matches the manifest AND its digest matches the manifest's
+    `<algo>:<hex>` entry. A size match with a digest mismatch triggers a
+    full redownload (the partial is removed first).
+
+    Parallel across files via a thread pool (workers>1). Each worker uses its
+    own HTTP session. Per-file resume is handled inside download().
 
     Returns (n_files, n_bytes) actually downloaded (0 when dry_run).
     """
-    total_bytes = 0
-    n_out = 0
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     out_dir = Path(out_dir)
+    to_fetch = []
     for f in files:
         size_mb = f["size"] / 1e6
         if dry_run:
@@ -357,12 +404,56 @@ def zenodo_download(s, files, out_dir, max_mb, dry_run=False):
             continue
         dest = out_dir / f["key"]
         if dest.exists() and dest.stat().st_size == f["size"]:
-            print(f"  SKIP     {size_mb:8.1f} MB  {dest.name} (already present)")
-            continue
-        print(f"  GET      {size_mb:8.1f} MB  {f['url']}")
-        download(s, f["url"], dest, max_mb)
-        total_bytes += f["size"]
-        n_out += 1
+            checksum = f.get("checksum", "")
+            if checksum and ":" in checksum:
+                algo, expected = checksum.split(":", 1)
+                algo = algo.lower()
+                actual = _file_hash(dest, algo)
+                if not actual:
+                    print(f"  SKIP     {size_mb:8.1f} MB  {dest.name} "
+                          f"(size match; {algo} unavailable)")
+                    continue
+                if actual == expected:
+                    print(f"  HASH OK  {size_mb:8.1f} MB  {dest.name} ({algo})")
+                    continue
+                print(f"  REDO     {size_mb:8.1f} MB  {dest.name} "
+                      f"({algo} mismatch: want {expected[:10]}..., got {actual[:10]}...)")
+                dest.unlink()
+            else:
+                print(f"  SKIP     {size_mb:8.1f} MB  {dest.name} "
+                      f"(size match; no manifest checksum)")
+                continue
+        to_fetch.append((f, dest))
+
+    if dry_run or not to_fetch:
+        return 0, 0
+
+    print(f"  queue    {len(to_fetch)} file(s), workers={workers}", flush=True)
+
+    def _one(entry):
+        f, dest = entry
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        pre = tmp.stat().st_size if tmp.exists() else 0
+        tag = "RESUME" if pre else "GET   "
+        print(f"  {tag}   {f['size']/1e6:8.1f} MB  {dest.name}"
+              + (f"  from {pre/1e6:.1f} MB" if pre else ""), flush=True)
+        local_s = session()
+        t0 = time.time()
+        download(local_s, f["url"], dest, max_mb, quiet=True)
+        dt = time.time() - t0
+        new_bytes = f["size"] - pre
+        rate = new_bytes / 1e6 / max(dt, 1e-6)
+        print(f"  done     {f['size']/1e6:8.1f} MB  {dest.name}  "
+              f"({dt:.1f}s, {rate:.1f} MB/s)", flush=True)
+        return f["size"]
+
+    total_bytes = 0
+    n_out = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_one, e) for e in to_fetch]
+        for fut in as_completed(futs):
+            total_bytes += fut.result()
+            n_out += 1
     return n_out, total_bytes
 
 
@@ -474,7 +565,11 @@ def convert(date, hours, out_root):
             continue
 
         df = pd.concat([read_states_csv(p) for p in srcs], ignore_index=True)
-        df["hour"] = int(pd.Timestamp(date, tz="UTC").timestamp()) + h * 3600
+        # hour-of-day is encoded in the partition path `hour={h}/`, not stored
+        # in the parquet (prevents pyarrow Hive-discovery schema conflicts with
+        # the partition dictionary type).
+        if "hour" in df.columns:
+            df = df.drop(columns=["hour"])
         out.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(out, index=False, compression="snappy")
 
@@ -557,8 +652,14 @@ def main():
                    default=ZENODO_OPENSKY_FLIGHTLIST_CONCEPT,
                    help=f"Zenodo concept ID (default: {ZENODO_OPENSKY_FLIGHTLIST_CONCEPT}, "
                         f"OpenSky flightlists)")
-    p.add_argument("--latest", action="store_true",
-                   help="Zenodo: download only the newest-dated flightlist file")
+    zsel = p.add_mutually_exclusive_group()
+    zsel.add_argument("--latest", action="store_true",
+                      help="Zenodo: download only the newest-dated flightlist file")
+    zsel.add_argument("--bulk-pull", action="store_true",
+                      help="Zenodo: download EVERY file matching --prefix "
+                           "(first-time hydration; the default behaviour but opt-in)")
+    p.add_argument("--workers", type=int, default=4,
+                   help="Zenodo: parallel download workers (default: 4)")
     a = p.parse_args()
 
     hours = parse_hours(a.hours)
@@ -606,9 +707,11 @@ def main():
                 sys.exit("no files to pick from")
             files = [picked]
             print(f"--latest resolved to: {picked['key']}")
+        elif a.bulk_pull:
+            print(f"--bulk-pull: {len(files)} file(s) matching prefix {a.prefix!r}")
 
         if not files:
-            sys.exit("no files matched. Widen --prefix or drop --latest.")
+            sys.exit("no files matched. Widen --prefix, or drop --latest/--bulk-pull.")
 
         # "version" from Zenodo may or may not already start with "v". Normalise.
         ver_str = version if str(version).startswith("v") else f"v{version}"
@@ -617,7 +720,8 @@ def main():
         print(f"\n{len(files)} file(s), {total_mb:.1f} MB -> {out_dir}")
         if a.dry_run:
             print("DRY-RUN: listing only, no files will be fetched\n")
-        nf, nb = zenodo_download(s, files, out_dir, a.max_mb, dry_run=a.dry_run)
+        nf, nb = zenodo_download(s, files, out_dir, a.max_mb,
+                                 dry_run=a.dry_run, workers=a.workers)
         label = "DRY-RUN total" if a.dry_run else "Done"
         print(f"\n{label}: {nf} file(s) fetched, {nb / 1e6:.1f} MB")
         return
