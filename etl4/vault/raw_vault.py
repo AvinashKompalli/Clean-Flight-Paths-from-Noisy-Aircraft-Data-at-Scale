@@ -20,9 +20,12 @@ Schema: see etl4/docs/data_vault_design.md.
 from __future__ import annotations
 
 import argparse
+import gc
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 
 from etl4.vault.schema import hash_series
@@ -221,6 +224,209 @@ def build_sat_state_observation(states: pd.DataFrame, load_dt: datetime) -> pd.D
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
+def _flightlist_files(flightlist_dir: Path) -> list[Path]:
+    if flightlist_dir.is_file():
+        return [flightlist_dir]
+    return sorted(flightlist_dir.rglob("*.parquet"))
+
+
+_FINAL_DEDUP = {
+    "hub_aircraft":          ["hk_aircraft"],
+    "hub_airport":           ["hk_airport"],
+    "hub_flight":            ["hk_flight"],
+    "link_flight_aircraft":  ["hk_flight_aircraft"],
+    "link_flight_route":     ["hk_flight_route"],
+    "sat_aircraft_identity": ["hk_aircraft"],
+    "sat_flight_summary":    ["hk_flight"],
+}
+
+
+def _duckdb_dedup_shards(shard_dir: Path, final_path: Path, keys: list[str],
+                         tmp_dir: Path, memory_limit: str = "4GB",
+                         threads: int = 4) -> int:
+    """Stream-dedup every parquet shard under shard_dir into final_path.
+
+    PARTITION BY the business key, ORDER BY the per-shard filename so the
+    first-file-seen contract from the pandas path is preserved (numbered
+    `part-NNN.parquet` sort before `zzz_extras.parquet`). DuckDB spills the
+    hash+sort to tmp_dir, so peak RAM is memory_limit, not the shards' total
+    size. Returns the row count written.
+    """
+    shard_glob = str(shard_dir / "*.parquet").replace("\\", "/")
+    final_out  = str(final_path).replace("\\", "/")
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir_s  = str(tmp_dir).replace("\\", "/")
+    partition  = ", ".join(keys)
+
+    sql = f"""
+    COPY (
+      SELECT * EXCLUDE(_fn)
+      FROM (
+        SELECT *, filename AS _fn
+        FROM read_parquet('{shard_glob}', filename=true)
+      )
+      QUALIFY row_number() OVER (PARTITION BY {partition} ORDER BY _fn) = 1
+    ) TO '{final_out}' (FORMAT PARQUET, COMPRESSION 'snappy')
+    """
+    con = duckdb.connect()
+    try:
+        con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+        con.execute(f"PRAGMA threads={threads}")
+        con.execute(f"PRAGMA temp_directory='{tmp_dir_s}'")
+        con.execute(sql)
+        n = con.execute(f"SELECT count(*) FROM read_parquet('{final_out}')").fetchone()[0]
+    finally:
+        con.close()
+    return int(n)
+
+
+def _dedup_safely(df: pd.DataFrame, subset: list[str]) -> pd.DataFrame:
+    """drop_duplicates without hitting pyarrow's 2 GiB single-malloc limit.
+
+    pandas "string" dtype is pyarrow-backed; its .factorize() routes through
+    pyarrow.ChunkedArray.dictionary_encode, which pre-allocates a single
+    buffer that fails at 2 GiB on large accumulators. Converting the key
+    columns to numpy-object first routes dedup through pandas' python-level
+    hashtable, which has no such ceiling. Convert back to "string" after.
+    """
+    if df.empty:
+        return df
+    pa_cols = [c for c in subset if df[c].dtype == "string"]
+    if pa_cols:
+        df = df.astype({c: "object" for c in pa_cols})
+    out = df.drop_duplicates(subset=subset, keep="first")
+    if pa_cols:
+        out = out.astype({c: "string" for c in pa_cols})
+    return out
+
+
+def _chunked_flightlist_vault(flightlist_dir: Path, states_hub_input: pd.DataFrame,
+                              out_dir: Path, load_dt: datetime) -> dict[str, int]:
+    """Spill each per-file builder output to a parquet shard, then dedupe
+    per table. Nothing accumulates in Python memory across files, so the
+    peak RSS is bounded by one file's working set (~500 MB raw flightlist)
+    plus the single table being finalized at the end. This replaces the
+    earlier in-RAM accumulator approach, which grew with the input and hit
+    Windows commit/fragmentation limits around 10/48 files (segfault in
+    pyarrow's native allocator).
+    """
+    files = _flightlist_files(flightlist_dir)
+    shard_root = out_dir / "_shards"
+    # Shards from an earlier interrupted run are reused: any file whose 7
+    # per-table shards are all present is skipped. A fresh run can be forced
+    # by deleting the shard_root directory before invoking build_raw_vault.
+
+    counts: dict[str, int] = {k: 0 for k in _FINAL_DEDUP}
+    if not files and states_hub_input.empty:
+        for k in _FINAL_DEDUP:
+            _write(pd.DataFrame(), k, out_dir)
+        return counts
+
+    builders = {
+        "hub_aircraft":          lambda fl: build_hub_aircraft(fl, pd.DataFrame(), load_dt),
+        "hub_airport":           lambda fl: build_hub_airport(fl, load_dt),
+        "hub_flight":            lambda fl: build_hub_flight(fl, load_dt),
+        "link_flight_aircraft":  lambda fl: build_link_flight_aircraft(fl, load_dt),
+        "link_flight_route":     lambda fl: build_link_flight_route(fl, load_dt),
+        "sat_aircraft_identity": lambda fl: build_sat_aircraft_identity(fl, load_dt),
+        "sat_flight_summary":    lambda fl: build_sat_flight_summary(fl, load_dt),
+    }
+    for t in builders:
+        (shard_root / t).mkdir(parents=True, exist_ok=True)
+
+    for i, f in enumerate(files, 1):
+        shard_paths = {t: shard_root / t / f"part-{i:03d}.parquet" for t in builders}
+        if all(p.exists() for p in shard_paths.values()):
+            if i % 5 == 0 or i == len(files):
+                print(f"  resumed {i}/{len(files)} files from existing shards",
+                      flush=True)
+            continue
+        # Partial shard set (prior crash mid-file): wipe partials so the file
+        # is rebuilt atomically.
+        for p in shard_paths.values():
+            p.unlink(missing_ok=True)
+        fl = pd.read_parquet(f)
+        for t, builder in builders.items():
+            frame = builder(fl)
+            # Per-file dedup on the business key keeps shards small and speeds
+            # up the final pass. Full cross-file dedup still happens below.
+            frame = _dedup_safely(frame, _FINAL_DEDUP[t]).reset_index(drop=True)
+            frame.to_parquet(shard_paths[t], index=False)
+            del frame
+        del fl
+        gc.collect()
+        if i % 5 == 0 or i == len(files):
+            print(f"  streamed {i}/{len(files)} files, shards spilled",
+                  flush=True)
+
+    # Fold state-vector icao24s into hub_aircraft before DuckDB sees the shards,
+    # so the multi-source hub contract from build_hub_aircraft is preserved.
+    # Name the extras file so it sorts AFTER every `part-NNN.parquet` shard; the
+    # finalize dedup orders by filename, and the pandas path's first-file-seen
+    # contract maps to "numbered shards win; extras fill only the gaps".
+    hub_aircraft_shard_dir = shard_root / "hub_aircraft"
+    extras_path = hub_aircraft_shard_dir / "zzz_extras.parquet"
+    if not states_hub_input.empty and not extras_path.exists():
+        extra = states_hub_input.copy()
+        extra["icao24"] = extra["icao24"].astype("string").str.strip().str.upper()
+        extra = extra.dropna(subset=["icao24"]).drop_duplicates(subset=["icao24"])
+        extra["hk_aircraft"] = hash_series(extra["icao24"])
+        extra["load_dt"] = load_dt
+        extra["rec_src"] = "opensky_s3"
+        hub_aircraft_shard_dir.mkdir(parents=True, exist_ok=True)
+        extra[["hk_aircraft", "icao24", "load_dt", "rec_src"]].to_parquet(
+            extras_path, index=False,
+        )
+        del extra
+        gc.collect()
+
+    print("  finalizing shards -> one part.parquet per table (DuckDB stream) ...",
+          flush=True)
+    duckdb_tmp = out_dir / "_duckdb_tmp"
+    for t, keys in _FINAL_DEDUP.items():
+        table_shard_dir = shard_root / t
+        final_path = out_dir / t / "part.parquet"
+        sentinel   = out_dir / t / "_DONE"
+        # Resume gate: a _DONE sentinel beside part.parquet means a prior run
+        # finalized this table successfully. The old gate ("shard dir missing")
+        # was unreliable because the streaming phase above re-creates shard
+        # dirs at startup, so it never fired even when the final was good.
+        if sentinel.exists() and final_path.exists():
+            counts[t] = int(duckdb.sql(
+                f"SELECT count(*) FROM read_parquet('"
+                f"{str(final_path).replace(chr(92), '/')}')"
+            ).fetchone()[0])
+            print(f"    {t}: {counts[t]:,} (resumed from _DONE sentinel)",
+                  flush=True)
+            if table_shard_dir.exists():
+                shutil.rmtree(table_shard_dir)
+            continue
+
+        shards = sorted(table_shard_dir.glob("*.parquet")) if table_shard_dir.exists() else []
+        if not shards:
+            _write(pd.DataFrame(), t, out_dir)
+            counts[t] = 0
+        else:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            counts[t] = _duckdb_dedup_shards(
+                table_shard_dir, final_path, keys, duckdb_tmp,
+            )
+        print(f"    {t}: {counts[t]:,}", flush=True)
+
+        sentinel.write_text(f"load_dt={load_dt.isoformat()}\n")
+        # Free this table's shards now that the final parquet + sentinel are
+        # on disk. Keeps peak disk bounded during the finalize pass.
+        if table_shard_dir.exists():
+            shutil.rmtree(table_shard_dir)
+        gc.collect()
+
+    if duckdb_tmp.exists():
+        shutil.rmtree(duckdb_tmp, ignore_errors=True)
+    if shard_root.exists():
+        shutil.rmtree(shard_root)
+    return counts
+
+
 def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
                     states_dir: Path = STATES_BRONZE,
                     out_dir: Path = VAULT_DIR,
@@ -228,50 +434,37 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
                     engine: str = "pandas") -> dict:
     """Read bronze, write every raw-vault table. Returns row counts.
 
+    Flightlists are processed file-by-file (streaming) so large bronze trees
+    (50+ monthly files, ~10 GB expanded) do not blow pandas memory.
+
     engine: "pandas" (default) or "spark". Spark routes only the large
-    sat_state_observation build through PySpark applyInPandas; hubs, links,
-    and the small satellites always stay on pandas.
+    sat_state_observation build through PySpark applyInPandas; the flightlist
+    hubs, links, and small satellites always stay on chunked pandas.
     """
     load_dt = datetime.now(timezone.utc)
 
     print("loading bronze ...")
-    flightlist = _load_parquet_tree(flightlist_dir)
-    print(f"  flightlist rows: {len(flightlist):,}")
-    # Pandas path reads states in-process; Spark path reads them itself and
-    # only needs the hub inputs (icao24 values) here.
-    if engine == "spark":
-        # Minimal frame for the hub build; the real state read happens in Spark.
-        files = sorted(states_dir.rglob("*.parquet")) if states_dir.exists() else []
-        if files and include_states:
-            import pyarrow.parquet as pq
-            states = pd.concat(
-                [pq.read_table(f, columns=["icao24"]).to_pandas() for f in files],
-                ignore_index=True,
-            )
-        else:
-            states = pd.DataFrame(columns=["icao24"])
-    else:
-        states = _load_parquet_tree(states_dir) if include_states else pd.DataFrame()
-    print(f"  state-vector rows: {len(states):,}")
+    # Only load the slim icao24 projection of states for the hub build;
+    # sat_state_observation builds the full read itself (pandas or Spark).
+    # pandas read_parquet(columns=...) is more tolerant of per-file schema
+    # drift (e.g. mixed int64 vs dictionary types on ancillary columns like
+    # `hour`, which pyarrow's dataset loader refuses to merge).
+    states_hub_input = pd.DataFrame(columns=["icao24"])
+    if include_states and states_dir.exists():
+        files = sorted(states_dir.rglob("*.parquet"))
+        frames = []
+        for f in files:
+            try:
+                frames.append(pd.read_parquet(f, columns=["icao24"]))
+            except Exception as e:
+                print(f"  skipped {f.relative_to(ROOT)}: {type(e).__name__}: {e}")
+        if frames:
+            states_hub_input = pd.concat(frames, ignore_index=True)
+    print(f"  state-vector icao24 rows (hub input): {len(states_hub_input):,}")
 
-    counts = {}
-    print("\nbuilding hubs ...")
-    counts["hub_aircraft"]   = _write(build_hub_aircraft(flightlist, states, load_dt), "hub_aircraft", out_dir)
-    counts["hub_airport"]    = _write(build_hub_airport(flightlist, load_dt), "hub_airport", out_dir)
-    counts["hub_flight"]     = _write(build_hub_flight(flightlist, load_dt), "hub_flight", out_dir)
-    print(f"  hub_aircraft={counts['hub_aircraft']:,}  "
-          f"hub_airport={counts['hub_airport']:,}  "
-          f"hub_flight={counts['hub_flight']:,}")
-
-    print("\nbuilding links ...")
-    counts["link_flight_aircraft"] = _write(build_link_flight_aircraft(flightlist, load_dt), "link_flight_aircraft", out_dir)
-    counts["link_flight_route"]    = _write(build_link_flight_route(flightlist, load_dt),    "link_flight_route",    out_dir)
-    print(f"  link_flight_aircraft={counts['link_flight_aircraft']:,}  "
-          f"link_flight_route={counts['link_flight_route']:,}")
-
-    print("\nbuilding satellites ...")
-    counts["sat_aircraft_identity"] = _write(build_sat_aircraft_identity(flightlist, load_dt), "sat_aircraft_identity", out_dir)
-    counts["sat_flight_summary"]    = _write(build_sat_flight_summary(flightlist, load_dt),    "sat_flight_summary",    out_dir)
+    print("streaming flightlist tree ...")
+    counts = dict(_chunked_flightlist_vault(flightlist_dir, states_hub_input,
+                                            out_dir, load_dt))
 
     if engine == "spark" and include_states:
         print("  sat_state_observation via Spark (applyInPandas on icao24) ...")
@@ -280,10 +473,25 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
             states_dir=states_dir,
             out_dir=out_dir / "sat_state_observation",
         )
-    else:
+    elif include_states:
+        state_cols = ["icao24", "time", "lat", "lon", "baroaltitude",
+                      "velocity", "heading", "vertrate", "callsign", "onground"]
+        s_files = sorted(states_dir.rglob("*.parquet")) if states_dir.exists() else []
+        s_frames = []
+        for f in s_files:
+            try:
+                s_frames.append(pd.read_parquet(f, columns=state_cols))
+            except Exception as e:
+                print(f"  skipped {f.relative_to(ROOT)}: {type(e).__name__}: {e}")
+        states = pd.concat(s_frames, ignore_index=True) if s_frames else pd.DataFrame()
         counts["sat_state_observation"] = _write(
             build_sat_state_observation(states, load_dt),
             "sat_state_observation", out_dir,
+        )
+        del states
+    else:
+        counts["sat_state_observation"] = _write(
+            pd.DataFrame(), "sat_state_observation", out_dir,
         )
     print(f"  sat_aircraft_identity={counts['sat_aircraft_identity']:,}  "
           f"sat_flight_summary={counts['sat_flight_summary']:,}  "
