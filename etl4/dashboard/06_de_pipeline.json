@@ -177,7 +177,7 @@
       "targets": [{
         "refId": "A",
         "format": "table",
-        "rawSql": "SELECT method || ' @ ' || noise AS run, rmse_m FROM fact_experiment_result WHERE rmse_m IS NOT NULL ORDER BY noise, method;"
+        "rawSql": "SELECT method || ' @ ' || CASE noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE noise END AS run, rmse_m FROM fact_experiment_result WHERE rmse_m IS NOT NULL ORDER BY noise, method;"
       }],
       "options": {"orientation": "horizontal", "showValue": "always", "legend": {"displayMode": "hidden"}},
       "fieldConfig": {"defaults": {"unit": "lengthm", "color": {"mode": "palette-classic"}}}
@@ -191,7 +191,7 @@
       "targets": [{
         "refId": "A",
         "format": "table",
-        "rawSql": "SELECT method || ' @ ' || noise AS run, wall_secs FROM fact_experiment_result WHERE wall_secs IS NOT NULL ORDER BY noise, method;"
+        "rawSql": "SELECT method || ' @ ' || CASE noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE noise END AS run, wall_secs FROM fact_experiment_result WHERE wall_secs IS NOT NULL ORDER BY noise, method;"
       }],
       "options": {"orientation": "horizontal", "showValue": "always", "legend": {"displayMode": "hidden"}},
       "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "palette-classic"}}}

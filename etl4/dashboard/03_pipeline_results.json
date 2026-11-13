@@ -79,7 +79,7 @@
             "uid": "Postgres"
           },
           "format": "table",
-          "rawSql": "SELECT method || ' | ' || noise AS label, wall_secs AS wall_s FROM ( SELECT method, noise, wall_secs, ROW_NUMBER() OVER (PARTITION BY method, noise ORDER BY started_at DESC) AS rn FROM pipeline_runs WHERE wall_secs IS NOT NULL ) t WHERE rn = 1 ORDER BY noise, method;",
+          "rawSql": "SELECT method || ' | ' || CASE noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE noise END AS label, wall_secs AS wall_s FROM ( SELECT method, noise, wall_secs, ROW_NUMBER() OVER (PARTITION BY method, noise ORDER BY started_at DESC) AS rn FROM pipeline_runs WHERE wall_secs IS NOT NULL ) t WHERE rn = 1 ORDER BY noise, method;",
           "rawQuery": true
         }
       ]
@@ -140,7 +140,7 @@
             "uid": "Postgres"
           },
           "format": "table",
-          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS position_rmse_m FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'position_rmse_m' AND (r.run_id, e.metric) IN ( SELECT r2.run_id, e2.metric FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'position_rmse_m' AND (r2.method, r2.noise, e2.recorded_at) IN ( SELECT r3.method, r3.noise, MAX(e3.recorded_at) FROM eval_results e3 JOIN pipeline_runs r3 ON r3.run_id = e3.run_id WHERE e3.metric = 'position_rmse_m' GROUP BY r3.method, r3.noise ) ) ORDER BY r.noise, r.method;",
+          "rawSql": "SELECT r.method || ' | ' || CASE r.noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE r.noise END AS label, e.value AS position_rmse_m FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'position_rmse_m' AND (r.run_id, e.metric) IN ( SELECT r2.run_id, e2.metric FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'position_rmse_m' AND (r2.method, r2.noise, e2.recorded_at) IN ( SELECT r3.method, r3.noise, MAX(e3.recorded_at) FROM eval_results e3 JOIN pipeline_runs r3 ON r3.run_id = e3.run_id WHERE e3.metric = 'position_rmse_m' GROUP BY r3.method, r3.noise ) ) ORDER BY r.noise, r.method;",
           "rawQuery": true
         }
       ]
@@ -203,7 +203,7 @@
             "uid": "Postgres"
           },
           "format": "table",
-          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS seg_f1 FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'seg_f1' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'seg_f1' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
+          "rawSql": "SELECT r.method || ' | ' || CASE r.noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE r.noise END AS label, e.value AS seg_f1 FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'seg_f1' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'seg_f1' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
           "rawQuery": true
         }
       ]
@@ -266,7 +266,7 @@
             "uid": "Postgres"
           },
           "format": "table",
-          "rawSql": "SELECT r.method || ' | ' || r.noise AS label, e.value AS continuity FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'continuity' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'continuity' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
+          "rawSql": "SELECT r.method || ' | ' || CASE r.noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' ELSE r.noise END AS label, e.value AS continuity FROM eval_results e JOIN pipeline_runs r ON r.run_id = e.run_id WHERE e.metric = 'continuity' AND (r.method, r.noise, e.recorded_at) IN ( SELECT r2.method, r2.noise, MAX(e2.recorded_at) FROM eval_results e2 JOIN pipeline_runs r2 ON r2.run_id = e2.run_id WHERE e2.metric = 'continuity' GROUP BY r2.method, r2.noise ) ORDER BY r.noise, r.method;",
           "rawQuery": true
         }
       ]
