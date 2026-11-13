@@ -87,3 +87,83 @@ Retroactive log of the major architectural and parameter choices baked into the 
 **Consequences**: Dedup is slightly stricter and rejects a type of row that was previously surviving clean(); downstream row counts may drop by ~0.1 % under N1–N3 noise profiles. No test required an assertion flip (16/16 still green).
 **Alternatives considered**: Align plan.md to the code (rejected for all three — the plan is the normative contract and the code was the drifted side). Add a configurable dedup-strictness flag (rejected — this is a schema invariant, not a tuning knob).
 
+### 2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh
+
+**Context**: Downstream of bronze every stage is full-refresh. The vault re-reads all 48 monthly flightlists on each build (20 to 30 min wall time, around 20 GB of transient shards during the final dedup). Marts rebuild from the full vault. The Postgres sink is `TRUNCATE` + `COPY` of roughly 4M fact rows. `eval_mart` is `DROP TABLE` + `CREATE TABLE`. Adding one month of bronze triggers a complete re-computation of the other 47. This is the single largest source of wasted compute and the proximate cause of the ENOSPC failures seen on the 10 GB scale-out. The DE-at-scale deliverable (plan.md section 1) is not credible until the pipeline stops redoing identical work.
+
+**Decision**: Adopt a partition contract keyed on the natural ingest cadence (one Zenodo file per calendar month) and a watermark registry in Postgres that lets every layer skip partitions it has already processed.
+
+**1. Partition key**. Every parquet tree (silver and gold) adopts a single partition key `ym=YYYY-MM`, extracted from the source `day` column at the first point in the lineage where it is available. Rationale: Zenodo publishes one flightlist archive per month (plan.md sections 5.4 and 6.3), the S3 state-vector tarballs are dated per UTC day and group cleanly into months, and the eval matrix dimension of interest is "which month do these metrics describe". Finer granularity (per day) multiplies partition count by roughly 30x with no analytic payoff; coarser (per quarter or per year) breaks the one-Zenodo-file-equals-one-partition contract that keeps `ym` extraction trivial.
+
+**2. Partition layout**. Partitioned per-month:
+
+- `data/silver/vault/hub_flight/ym=YYYY-MM/part.parquet`
+- `data/silver/vault/link_flight_aircraft/ym=YYYY-MM/part.parquet`
+- `data/silver/vault/link_flight_route/ym=YYYY-MM/part.parquet`
+- `data/silver/vault/sat_flight_summary/ym=YYYY-MM/part.parquet`
+- `data/silver/vault/sat_state_observation/ym=YYYY-MM/part.parquet`
+- `data/gold/marts/fact_flight/ym=YYYY-MM/part.parquet`
+- `data/gold/marts/fact_trajectory_enriched/ym=YYYY-MM/part.parquet`
+
+Non-partitioned (small, globally-unique dimension-like tables):
+
+- `data/silver/vault/hub_aircraft/part.parquet`
+- `data/silver/vault/hub_airport/part.parquet`
+- `data/silver/vault/sat_aircraft_identity/part.parquet`
+- `data/gold/marts/dim_aircraft/part.parquet`
+- `data/gold/marts/dim_airport/part.parquet`
+
+Hubs that model a global entity (an airframe is the same airframe across every month, an airport is the same airport) stay single-file. Duplicating them per month would trade constant-time downstream joins for a monthly union in every reader. Their size is bounded by the real-world population (well under 1M airframes, 18.6k airports), and the small compaction cost (step 4) is cheaper than forcing every mart and QA query to pay a union.
+
+**3. Watermark registry in Postgres**. Added in `etl4/infra/create_tables.sql`:
+
+```sql
+CREATE TABLE IF NOT EXISTS pipeline_watermarks (
+    layer       TEXT NOT NULL,
+    table_name  TEXT NOT NULL,
+    last_ym     TEXT NOT NULL,       -- 'YYYY-MM'
+    row_count   BIGINT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (layer, table_name)
+);
+CREATE INDEX IF NOT EXISTS idx_watermarks_layer ON pipeline_watermarks(layer);
+```
+
+One row per (layer, table). `layer` is one of `vault`, `marts`, `sink`, `matrix`, `eval_mart`. `last_ym` is the newest ym the writer has committed. `row_count` is an advisory total used by the row-count reconciliation guardrail (separate ADR), not a correctness gate here. Reads are a single primary-key lookup; writes happen inside the same transaction that materialises the partition for that layer.
+
+**4. Per-layer incremental mechanism**.
+
+*Vault*. `_chunked_flightlist_vault` queries the watermark for `(vault, hub_flight)` to get `last_ym`, lists bronze flightlist files, keeps only those whose extracted ym is strictly greater, and streams each one into its own `ym=YYYY-MM/part.parquet` for the five partitioned tables. Within-month dedup is sufficient and safe because hub, link, and sat natural keys resolve deterministically from the source rows (plan.md section 6.1): the same `(icao24, firstseen)` in two different months produces two different hashes by construction. The three non-partitioned dimension tables (hub_aircraft, hub_airport, sat_aircraft_identity) are rebuilt by a tiny compaction pass that reads only the new month's partitioned sats/links to extract new icao24 / airport / aircraft-identity rows, unions with the existing non-partitioned parquet, dedupes on the hash key, and rewrites the single file. Sizes are small enough (around 10 MB each) that rewriting is cheaper than tracking deltas. After both passes commit, the watermark advances to the new ym.
+
+*Marts*. `vault/marts.py` reads only `ym > last_ym` partitions of the partitioned vault tables, joins against the non-partitioned dims in full (they are small), and writes `ym=YYYY-MM/part.parquet` into each target. No global recompute. pyarrow dataset reads with a partition filter mean unchanged months are never touched.
+
+*Sink (Postgres)*. `postgres_sink.py` replaces `TRUNCATE` with per-partition `INSERT ... ON CONFLICT` per target. For `dim_aircraft`: `ON CONFLICT (hk_aircraft) DO UPDATE SET icao24=EXCLUDED.icao24, registration=EXCLUDED.registration, typecode=EXCLUDED.typecode`. For `fact_trajectory_enriched`: `ON CONFLICT (hk_aircraft, time) DO UPDATE SET lat=EXCLUDED.lat, lon=EXCLUDED.lon, baroaltitude=EXCLUDED.baroaltitude, velocity=EXCLUDED.velocity, heading=EXCLUDED.heading, callsign=EXCLUDED.callsign, typecode=EXCLUDED.typecode, registration=EXCLUDED.registration`. The primary key is already `(hk_aircraft, time)` (create_tables.sql line 64), so the clause coexists with the existing schema without a migration. The sink loads one month at a time, commits, updates the watermark, moves on.
+
+*Matrix*. Add `ym TEXT` to `pipeline_runs` and a unique constraint `(ym, source, method, noise)`. Re-running the matrix for a (month, source, method, noise) tuple already measured is a no-op via `ON CONFLICT DO NOTHING`. This closes the current bug where each re-run accumulates duplicate rows and silently biases dashboard aggregates.
+
+*eval_mart*. Converted from a materialised table to a plain SQL view over `pipeline_runs` left-joined to `eval_results`. Zero storage, always consistent with the run registry, incremental by definition. Dashboard latency stays well under a second because `pipeline_runs` is bounded by (ym x source x method x noise) and will not exceed a few thousand rows over the project horizon.
+
+**5. Backfill and rewind primitive**. New module `etl4/orchestration/rewind.py` with one CLI:
+
+```
+python -m etl4.orchestration.rewind --layer vault --from 2022-03 --to 2022-05
+```
+
+Deletes `data/silver/vault/<table>/ym=2022-03/`, `ym=2022-04/`, `ym=2022-05/` for every partitioned vault table, deletes the matching rows from Postgres sink tables (filtered by `ym` once the column is added to `fact_trajectory_enriched`), and sets `pipeline_watermarks.last_ym` to `2022-02` for every `(vault, *)` row. A subsequent `run_e2e --only vault` picks the three months back up via the ordinary incremental path. `--layer marts|sink|matrix` do the equivalent for their respective layer. `--layer all` chains all four in the correct order and refuses to run without `--yes` to protect against accidental full rewinds.
+
+**6. Migration path (one-shot zero-reprocess split)**. For each partitioned table, a one-off script reads the current monolithic `part.parquet`, derives `ym` from `day` (vault flightlist outputs) or `floor(time / month_seconds)` (sat_state_observation), and writes `ym=YYYY-MM/part.parquet` via `pyarrow.parquet.write_to_dataset(..., partition_cols=["ym"])`. Zero re-processing of upstream data: the migration is a parquet rechunking pass. For the three non-partitioned small-dim tables there is no change. The alternative "lazy ym=all" bucket was rejected because it keeps a monolithic parquet in the tree indefinitely: the next full-refresh (schema change, hash change, reset) would still have to re-materialise it, and every reader would have to union it with newer partitions forever.
+
+**Consequences**: One new month triggers roughly one month of real work at every layer. The vault step drops from 20 to 30 min to about 1 to 2 min for a single-month delta on current hardware. The 20 GB shard footprint during finalize vanishes because each monthly shard is written once and never re-concatenated with the others. The Postgres footprint grows additively instead of being wiped and rewritten each run; WAL pressure drops proportionally. The `eval_mart` view removes one storage-bearing stage entirely. The matrix stops accumulating duplicate rows. The migration itself is a single pyarrow pass per table, measured in minutes against today's data. Required follow-ups: (a) extend `vault/marts.py` to accept a `--only-ym` filter, (b) add `ym` to `fact_trajectory_enriched` and backfill it, (c) add the unique constraint migration on `pipeline_runs`, (d) extend `pipeline_watermarks` writes into every layer that writes partitions. Readers continue to work during the migration window because they fall back to the single `part.parquet` when no `ym=*` children exist.
+
+**Alternatives considered**: Per-day partitions (rejected - 30x partition count with no analytic payoff and no match to the ingest cadence). Partitioning every table including the small dims (rejected - duplicates a globally-unique entity across months, forcing every reader to union-and-dedup; the compaction cost of three around-10 MB non-partitioned files is lower than the join-time cost everywhere else). Skip the watermark table and infer state from the filesystem (rejected - a half-written partition directory plus a crash leaves the pipeline unable to distinguish done from partial; Postgres provides a transactional commit point). Track incremental state in sqlite or a json file (rejected - Postgres is already up and already depended on by the matrix and the dashboard, a second state store doubles operational surface for no gain). Keep the monolithic `part.parquet` and add a bronze-level change-data-capture layer (rejected - adds a Debezium-equivalent service outside the scope of this project and does not solve the within-run dedup memory bomb).
+
+**Risks**:
+
+1. *Cross-month flights*. A flight that departs on the last UTC day of month M and arrives on the first UTC day of month M+1 is a single real flight but is split across two Zenodo files (`firstseen` in M, `lastseen` in M+1). The link_flight_route and sat_flight_summary partitions carry two rows for one flight unless dedup is global. Mitigation: natural-key hashes are stable, so the two rows share an identical `hk_flight`; the mart build is instructed to pick the row with the later `lastseen` when reducing the stream. The rule lives on the reader side, so writers stay partition-local.
+
+2. *Global uniqueness for small hubs*. hub_aircraft asserts one row per airframe in the whole dataset. The compaction pass trusts that natural-key hashes are stable. If a future ingest source normalises `icao24` differently (lowercase vs uppercase, leading-zero stripping), the same airframe could land twice. Mitigation: the string-cleaning contract in `clean.py::project_raw` is already the single point of enforcement (CLAUDE.md section 2.6); the compaction pass dedupes on `hk_aircraft`, so any drift surfaces as a visible row-count anomaly via the watermark's `row_count` column.
+
+3. *ym extraction when the source lacks a `day` column*. The S3 state-vector bronze is partitioned by `date=YYYY-MM-DD/hour=HH/` in its path, not by an in-file column (`kafka_bronze_consumer.py` and `daily_batch.py` strip the column deliberately). ym has to come from the path, not the file. Mitigation: the vault extractor uses `pyarrow.dataset` with a partitioning spec that turns `date=` back into a virtual column, then takes `.str.slice(0, 7)` for ym. For flightlist bronze the in-file `day` column is authoritative. One helper keeps the two sources symmetric.
+
+4. *Watermark vs filesystem drift*. If an operator deletes a partition directory by hand without using `rewind`, the watermark will claim the month is loaded when it is not. Mitigation: a cheap QA check (one `COUNT(*)` of partition dirs per table vs `last_ym`) runs at the top of `run_e2e` and refuses to start if they disagree.
+

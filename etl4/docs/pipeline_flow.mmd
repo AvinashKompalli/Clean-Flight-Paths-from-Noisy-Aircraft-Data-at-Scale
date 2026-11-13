@@ -1,0 +1,169 @@
+%% ETL4 — end-to-end data flow (as of 2026-11-13, post-DE-at-scale improvements)
+%% Render:  https://mermaid.live   or:  mmdc -i pipeline_flow.mmd -o pipeline_flow.png
+%% Legend:  rectangles = code / transforms,  cylinders = storage,  queues = Kafka topics
+%%          dashed lines = telemetry / sampling,  solid lines = the data path.
+
+flowchart TB
+    %% ============================================================
+    %%  SOURCES
+    %% ============================================================
+    subgraph SRC["SOURCES (public, upstream)"]
+        direction LR
+        ZEN["OpenSky Zenodo<br/>concept 3737101<br/>v23.00, 50 monthly files<br/>8.1 GB gzip CSV"]
+        REST["OpenSky REST API<br/>/states/all<br/>OAuth2, 17-field JSON"]
+        S3X["OpenSky S3 bucket<br/>(RETIRED Nov 2026,<br/>kept for reference only)"]
+    end
+
+    %% ============================================================
+    %%  INGEST
+    %% ============================================================
+    subgraph INGEST["INGEST  (etl4/ingest, etl4/screpper.py)"]
+        direction TB
+        SCR["screpper.py --repo zenodo<br/>+ HTTP Range resume<br/>+ ThreadPool workers=4"]
+        PROD["live_producer.py<br/>raw 17 fields -> Kafka<br/>OAuth2, 401 retry + DLQ"]
+        KCON["kafka_bronze_consumer.py<br/>drain adsb.raw -> parquet<br/>at-least-once, batch=5000"]
+    end
+
+    %% ============================================================
+    %%  BRONZE  (raw, source-of-truth)
+    %% ============================================================
+    subgraph BRONZE["BRONZE  data/bronze/  (raw, append-only)"]
+        direction LR
+        BFL[("flightlists/v23.00/<br/>flightlist_YYYYMMDD_YYYYMMDD<br/>.parquet  (50 files, 7.6 GB)")]
+        BRS[("raw_states/<br/>date=YYYY-MM-DD/<br/>hour=HH/part.parquet")]
+    end
+
+    %% ============================================================
+    %%  SILVER
+    %% ============================================================
+    subgraph SILVER["SILVER  data/silver/  (cleaned + modeled)"]
+        direction TB
+        subgraph VAULT["raw_vault.py  (chunked, file-by-file, memory-bounded)"]
+            direction LR
+            HA[("hub_aircraft")]
+            HP[("hub_airport")]
+            HF[("hub_flight")]
+            LFA[("link_flight_aircraft")]
+            LFR[("link_flight_route")]
+            SAI[("sat_aircraft_identity")]
+            SFS[("sat_flight_summary")]
+            SSO[("sat_state_observation<br/>via Spark applyInPandas<br/>on icao24 groups")]
+        end
+        CLS[("cleaned_states/<br/>&lt;source&gt;/&lt;noise&gt;/part.parquet<br/>(project+noise+clean+order,<br/>one per noise profile)")]
+    end
+
+    %% ============================================================
+    %%  GOLD  (business marts + experiment outputs)
+    %% ============================================================
+    subgraph GOLD["GOLD  data/gold/marts/"]
+        direction TB
+        DMA[("dim_aircraft")]
+        DMP[("dim_airport")]
+        FF[("fact_flight")]
+        FTE[("fact_trajectory_enriched")]
+        RECON[("reconstructions/<br/>&lt;src&gt;/&lt;noise&gt;/method=&lt;m&gt;/<br/>12 gold trajectory parquets")]
+        FER[("fact_experiment_result<br/>(12-row pivot of<br/>pipeline_runs x eval_results)")]
+    end
+
+    %% ============================================================
+    %%  POSTGRES SINK
+    %% ============================================================
+    subgraph PG["POSTGRES  etl4-postgres  (serving layer)"]
+        direction LR
+        PDMA[("dim_aircraft")]
+        PFTE[("fact_trajectory_enriched")]
+        PFER[("fact_experiment_result")]
+        PRUN[("pipeline_runs<br/>(telemetry)")]
+        PER[("eval_results<br/>(per-metric rows)")]
+    end
+
+    %% ============================================================
+    %%  EVAL (reconstruction matrix experiment)
+    %% ============================================================
+    subgraph EVAL["RECONSTRUCTION MATRIX  (etl4/bench/run_matrix.py)"]
+        direction TB
+        RM["Pass 1: silver cache by noise<br/>(4 writes, memoized)"]
+        RM2["Pass 2: ProcessPool workers=4<br/>12 (method x noise) tasks<br/>-> trajectories + metrics"]
+    end
+
+    %% ============================================================
+    %%  OBSERVABILITY / QA
+    %% ============================================================
+    subgraph OBS["OBSERVABILITY + QA"]
+        direction LR
+        GE["Great Expectations<br/>5 suites x 5 expectations<br/>(bronze + marts)"]
+        PROM["Prometheus<br/>ingest_runs + pipeline_runs"]
+        GRAF["Grafana dashboards"]
+        AF["Airflow DAGs<br/>4 scheduled pipelines"]
+    end
+
+    %% ============================================================
+    %%  EDGES - the actual data path
+    %% ============================================================
+    ZEN     -->|HTTP Range + 4 workers| SCR
+    REST    -->|JSON, raw 17 fields|   PROD
+    PROD    -->|Kafka adsb.raw|        KCON
+    S3X -.->|retired|                  SCR
+
+    SCR     -->|bronze_flightlists.py<br/>CSV.gz -> parquet| BFL
+    KCON    -->|parquet per hour|      BRS
+
+    BFL     -->|streamed, 50-file chunked<br/>build_hub_*, build_link_*, build_sat_*| VAULT
+    BRS     -->|pyarrow slim read (icao24)| HA
+    BRS     -->|Spark distributed scan|     SSO
+
+    HA & HP & HF & LFA & LFR & SAI & SFS & SSO -->|marts.py joins + aggregates| DMA
+    SFS     --> FF
+    SSO & LFA --> FTE
+    LFR     --> DMP
+
+    DMA --> PDMA
+    FTE --> PFTE
+    FER --> PFER
+
+    BRS -->|read full state-vector bronze|      RM
+    RM  -->|prepare_silver per noise|           CLS
+    CLS -->|read parquet in each worker|        RM2
+    RM2 -->|reconstruct_from_silver + write gold| RECON
+    RM2 -->|write_run(metrics)|                 PRUN
+    RM2 -->|per-metric rows|                    PER
+    PRUN & PER -->|eval_mart pivot query|        FER
+
+    %% Observability + QA
+    BFL  -.->|GE suite: bronze_raw_states|          GE
+    DMA  -.->|GE suite: mart_dim_aircraft|          GE
+    DMP  -.->|GE suite: mart_dim_airport|           GE
+    FTE  -.->|GE suite: fact_trajectory_enriched|   GE
+    FER  -.->|GE suite: fact_experiment_result|     GE
+
+    PROD -.->|ingest_runs counter|  PROM
+    SCR  -.->|ingest_runs counter|  PROM
+    RM2  -.->|pipeline_runs metric| PROM
+    PROM --> GRAF
+
+    AF   -.->|opensky_live_stream|  PROD
+    AF   -.->|opensky_live_stream|  KCON
+    AF   -.->|daily_incremental_load| SCR
+    AF   -.->|daily_incremental_load| VAULT
+    AF   -.->|daily_incremental_load| PG
+    AF   -.->|data_quality_checks|  GE
+    AF   -.->|nightly_vault_rebuild| VAULT
+
+    %% ============================================================
+    %%  Styling (works in both light + dark Mermaid renderers)
+    %% ============================================================
+    classDef source  fill:#eaeaea,stroke:#555,color:#222
+    classDef bronze  fill:#c48b49,stroke:#7a4e1d,color:#fff
+    classDef silver  fill:#b7b7b7,stroke:#555,color:#111
+    classDef gold    fill:#f7c948,stroke:#8a6d12,color:#222
+    classDef pg      fill:#336791,stroke:#1a3f5c,color:#fff
+    classDef obs     fill:#5e9a4a,stroke:#2f5a21,color:#fff
+    classDef code    fill:#f2f2f2,stroke:#333,color:#000
+
+    class ZEN,REST,S3X source
+    class BFL,BRS bronze
+    class HA,HP,HF,LFA,LFR,SAI,SFS,SSO,CLS silver
+    class DMA,DMP,FF,FTE,RECON,FER gold
+    class PDMA,PFTE,PFER,PRUN,PER pg
+    class GE,PROM,GRAF,AF obs
+    class SCR,PROD,KCON,RM,RM2 code
