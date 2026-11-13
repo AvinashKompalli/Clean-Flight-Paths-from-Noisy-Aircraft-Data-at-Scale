@@ -167,3 +167,19 @@ Deletes `data/silver/vault/<table>/ym=2022-03/`, `ym=2022-04/`, `ym=2022-05/` fo
 
 4. *Watermark vs filesystem drift*. If an operator deletes a partition directory by hand without using `rewind`, the watermark will claim the month is loaded when it is not. Mitigation: a cheap QA check (one `COUNT(*)` of partition dirs per table vs `last_ym`) runs at the top of `run_e2e` and refuses to start if they disagree.
 
+### 2026-11-14 - NoiseTruth return contract for inject_noise and __truth_id correspondence tag
+
+**Context**: Half of `fact_experiment_result`'s metric columns (`seg_precision`, `seg_recall`, `seg_f1`, `position_rmse_m`, `boundary_err_s`) are NULL because `bench/noise.py::inject_noise` currently returns only the noisy DataFrame and throws away everything else it knows. The injection step is the only place in the pipeline that has ground truth for the synthetic path, and the only place that can carry deviation-detection ground truth for the real-data path (by scoring detectors against the ids it jumped). `plan.md` section 15 and the course PDF section 3 both list these metrics as success criteria; shipping them as NULL hides the accuracy half of the accuracy-vs-cost question the project is organised around.
+
+**Decision**: `inject_noise(df, profile, seed=42) -> pd.DataFrame` becomes `inject_noise(df, profile, seed=42) -> tuple[pd.DataFrame, NoiseTruth]`. `NoiseTruth` is a frozen dataclass in the same module carrying `profile`, `seed`, `original_row_count`, `original_coords` (DataFrame of pre-jump `__truth_id, lat, lon, baroaltitude`), `dropped_ids`, `duplicated_ids`, `shuffled_ids`, `jumped_ids` (each a frozenset of ints), and `true_boundaries` (list of per-flight start points). All callers update: `run_experiment.prepare_silver` captures the truth, `reconstruct_from_silver` forwards it into `metrics.*`.
+
+Pair with a stable `__truth_id` column emitted by `ingest/synthetic.py` on every row it generates (integer, monotonic across the generated set). Preserved through `clean.project_raw`, `clean.clean` (dedup tiebreaker = lower `__truth_id` wins), `event_time_order`, every `reconstruct.*` method, and the final gold write.
+
+**Consequences**: Full feature-metric matrix populates for the synthetic path. `seg_*`, `position_rmse_m`, `boundary_err_s`, `coverage_ratio`, `deviation_prf` all go from NULL to real numbers. The Pareto-frontier view (`v_pareto_frontier` in the same PR) finally has data to render. Real-data (`s3`, `rest`) paths see no behaviour change - no `__truth_id` is emitted there, and the metric functions skip when the column is absent.
+
+Downstream impact is confined: `metrics.py` functions already accept the shapes `NoiseTruth` and `__truth_id` enable; `sink/postgres.py::_PERSISTED_METRICS` already lists the five formerly-NULL metrics; `pipeline_runs`/`eval_results` schemas are unchanged.
+
+**Alternatives considered**: Compute ground truth by rerunning the clean synthetic through the methods and diffing (rejected - noise is random; the diff is noise, not signal); mutate `df` in place and return masks separately via a global or thread-local (rejected - breaks determinism and testability); score only against external reference tracks (rejected - no cheap source of trusted reference paths at scale); extend `metrics.py` to join on `(icao24, time)` with tolerance (rejected - `(icao24, time)` drifts under jump noise, so position RMSE would underreport; `__truth_id` makes the join exact).
+
+**Risks**: `clean.dedup` must gain an explicit `__truth_id` tiebreaker or duplicate-dropping becomes non-deterministic (documented in task T-002). `psutil` must be pinned if `bench/scale_study.py` ships in the same PR (documented separately if that change lands).
+

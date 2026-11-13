@@ -1,0 +1,55 @@
+{
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "title": "WI-1: Populate the full feature-metric matrix + Pareto frontier + scale study",
+  "description": "Make seg_precision, seg_recall, seg_f1, position_rmse_m, boundary_err_s, and deviation_prf1 actually compute in fact_experiment_result using noise.py injected noise as ground truth. Add v_pareto_frontier view and dashboard 08_accuracy_cost.json. Add scale_runs table and etl4/bench/scale_study.py. Phases 1-3 of the user-confirmed WI-1 + WI-2 plan on branch feature/pipeline-3-avinash.",
+  "created_at_utc": "2026-11-14T02:08:00Z",
+  "updated_at_utc": "2026-11-14T02:13:00Z",
+  "phase": "IMPLEMENTATION_READY",
+  "tasks": [],
+  "artifacts": {
+    "requirements": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md",
+    "architecture": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/architecture.md"
+  },
+  "approval_history": [
+    {
+      "gate": "REQUIREMENTS",
+      "approver": "product-owner",
+      "status": "APPROVED",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md",
+      "conditions": [
+        "Data Engineer to confirm default: NoiseTruth in-memory per run (no disk persistence)",
+        "Data Engineer to confirm default: 50M scale-study volume skip-and-log for kinematic_smoothing if peak_rss_mb > 12000",
+        "Data Engineer to confirm default: deviation_prf1 wraps existing reconstruct/deviations.py residual mask rather than recomputing"
+      ],
+      "timestamp_utc": "2026-11-14T02:10:00Z"
+    },
+    {
+      "gate": "ARCHITECTURE",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/architecture.md",
+      "conditions_addressed": [
+        "NoiseTruth in-memory per run: confirmed, no disk persistence",
+        "50M scale-study kinematic_smoothing skip-and-log at projected_peak_rss_mb>12000: folded into T-005 acceptance",
+        "deviation_prf1 wraps existing reconstruct/deviations.py residual mask: confirmed, no new detector logic in metrics.py"
+      ],
+      "adr_added": "etl4/docs/decisions.md ADR 2026-11-14 - NoiseTruth return contract and __truth_id correspondence tag",
+      "tasks_defined": 8,
+      "parallel_workstreams": 5,
+      "timestamp_utc": "2026-11-14T02:13:00Z"
+    }
+  ],
+  "open_defects": [],
+  "change_requests": [],
+  "last_handoff": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/handoffs/20261114T0213-data-engineer-to-orchestrator.json",
+  "source_request": "User request 2026-11-14: Create the agentic org and start with the work. Work = Work Item 1 (fill metric matrix + Pareto + scale study) and Work Item 2 Phase A+B (deviation detection pipeline, batch then streaming). Scope for this invocation: initialize project + run REQUIREMENTS and ARCHITECTURE phases concurrently (because the design was already sketched in this conversation and specialists are formalizing their part). IMPLEMENTATION, UNIT_TEST, FUNCTIONAL_TEST phases await subsequent /workflow invocations.",
+  "standing_rules": [
+    "CLAUDE.md at repo root is non-negotiable",
+    "ETL4 (3) (1).pdf is the authoritative project brief",
+    "No Claude co-author trailer on commits (CLAUDE.md 2.1)",
+    "No secrets, no large data (CLAUDE.md 2.2, 2.3)",
+    "icao24 is pandas string dtype (CLAUDE.md 2.6)",
+    "Windows cp1252-safe output (CLAUDE.md 2.7)",
+    "Use tokens minimally (user standing rule)"
+  ]
+}

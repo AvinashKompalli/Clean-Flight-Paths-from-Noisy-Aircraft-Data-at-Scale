@@ -1,0 +1,55 @@
+{
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "task_id": "T-000",
+  "from_agent": "data-engineer",
+  "to_agent": "orchestrator",
+  "current_phase": "ARCHITECTURE",
+  "objective": "Formalize technical architecture for WI-1 (fill feature-metric matrix + Pareto frontier view + scale study) against the PO's requirements.md and the parent conversation's user-confirmed scope.",
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/state.json",
+    "CLAUDE.md",
+    "plan.md",
+    "ETL4 (3) (1).pdf (via team memory)",
+    "etl4/bench/noise.py",
+    "etl4/bench/run_experiment.py",
+    "etl4/evaluate/metrics.py",
+    "etl4/sink/postgres.py",
+    "etl4/ingest/synthetic.py"
+  ],
+  "expected_output": "architecture.md with data contracts, task breakdown, parallel workstreams, risks; ADR appended to etl4/docs/decisions.md; approval_history updated.",
+  "dependencies": [
+    "requirements.md APPROVED by product-owner at 2026-11-14T02:10Z (with 3 conditions)"
+  ],
+  "acceptance_criteria": [
+    "architecture.md covers all 16 FRs from requirements.md",
+    "NoiseTruth dataclass contract explicit",
+    "__truth_id lifecycle explicit",
+    "v_pareto_frontier DDL present",
+    "scale_runs DDL present",
+    "task breakdown assigns T-001..T-008 to named agents with prereqs",
+    "ADR appended in CLAUDE.md non-negotiables style (no co-author trailer, no em-dashes in prose)",
+    "PO's 3 conditions on their APPROVAL explicitly addressed in the arch doc"
+  ],
+  "risks": [
+    "__truth_id leakage through clean.dedup requires explicit tiebreaker (T-002 acceptance includes this)",
+    "RMSE/F1 synthetic-only; dashboards must label cells by source",
+    "psutil pin may need an ADR if not already in requirements.txt",
+    "Scope for IMPLEMENTATION is 8 tasks; parallelism caps at 3 after T-001 lands"
+  ],
+  "status": "APPROVED",
+  "evidence": {
+    "artifacts": [
+      "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/architecture.md",
+      "etl4/docs/decisions.md (ADR 2026-11-14: NoiseTruth return contract and __truth_id correspondence tag)"
+    ],
+    "commands_run": [
+      "Read noise.py, run_experiment.py, metrics.py, sink/postgres.py, synthetic.py",
+      "tail -2 etl4/docs/decisions.md (confirmed ADR insertion point)"
+    ],
+    "test_counts": {},
+    "notes": "Existing metrics.py functions already have the right shapes; NoiseTruth + __truth_id are the upstream prerequisites they need. No change to _PERSISTED_METRICS or sink schema. Parallel PO fork delivered requirements.md during arch authoring; all 16 FRs + 12 NFRs + conditions reconciled into the final architecture."
+  },
+  "next_action": "Orchestrator to advance phase=IMPLEMENTATION, dispatch developer-backend on T-001 (NoiseTruth contract) as the critical path; T-007 (unit tests) can start in parallel against the T-001 interface stub; T-004 (SQL DDL) can also run concurrent with T-001.",
+  "timestamp_utc": "2026-11-14T02:13:00Z"
+}
