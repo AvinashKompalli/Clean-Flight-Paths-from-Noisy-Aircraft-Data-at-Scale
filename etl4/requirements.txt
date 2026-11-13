@@ -13,6 +13,7 @@ requests==2.34.2
 python-dotenv==1.2.4
 PyYAML==6.0.3
 prometheus_client==0.26.0
+psutil==7.2.2
 
 # Distributed execution (optional path: raw_vault --engine spark)
 pyspark==3.5.3

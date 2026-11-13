@@ -4,13 +4,23 @@ Output: data/bronze/raw_states/date=YYYY-MM-DD/hour=H/part-0.parquet
 Columns follow OpenSky state_vectors_data4.
 Fake noise is added on purpose: gaps, position jumps, and duplicates.
 Use it to test clean, reconstruct, and evaluate before real data arrives.
+
+Every row generated here carries a stable `__truth_id` (monotonic int64,
+unique across the whole generated set) so downstream metric functions can
+join predictions back to ground truth even after noise injection reorders,
+duplicates, or drops rows. See ADR 2026-11-14 in etl4/docs/decisions.md.
 """
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from etl4.bench.noise import TRUTH_ID  # noqa: E402
 
 COLUMNS = [
     "time", "icao24", "lat", "lon", "velocity", "heading", "vertrate",
@@ -65,6 +75,37 @@ def add_noise(df, rng):
     return pd.concat([df, dup], ignore_index=True)
 
 
+def generate_synthetic(n_rows: int, seed: int = 42) -> pd.DataFrame:
+    """Return a clean, bronze-shaped synthetic DataFrame with `__truth_id`.
+
+    `n_rows` is an exact target: the result has exactly `n_rows` rows (we
+    generate enough flights to cover it and then truncate). `__truth_id`
+    is a monotonic int64 column, unique per row, starting at 0. Intended
+    for callers that need a small in-memory synthetic frame without
+    writing to disk.
+    """
+    if n_rows < 1:
+        raise ValueError(f"n_rows must be positive, got {n_rows}")
+    rng = np.random.default_rng(seed)
+    step = 1
+    # Aim for roughly square (n_aircraft x n_steps) so neither dimension
+    # degenerates. Minimum 1 aircraft, minimum 1 step per aircraft.
+    n_aircraft = max(1, int(np.ceil(np.sqrt(n_rows))))
+    n_steps = max(1, int(np.ceil(n_rows / n_aircraft)))
+    t0 = int(pd.Timestamp("2026-01-01", tz="UTC").timestamp())
+    frames = []
+    for i in range(n_aircraft):
+        icao = f"{0xA00000 + i:06x}"
+        frames.append(make_flight(rng, icao, t0, n_steps, step))
+    df = pd.concat(frames, ignore_index=True)
+    df["hour"] = t0
+    if len(df) > n_rows:
+        df = df.iloc[:n_rows].reset_index(drop=True)
+    df[TRUTH_ID] = np.arange(len(df), dtype=np.int64)
+    df["icao24"] = df["icao24"].astype("string")
+    return df[COLUMNS + [TRUTH_ID]]
+
+
 def main():
     root, cfg = load_cfg()
     p = argparse.ArgumentParser()
@@ -83,6 +124,7 @@ def main():
     # segmenter's 30-min `break_time` so hours do not merge into one flight.
     BETWEEN_FLIGHT_GAP_S = 45 * 60
     clean_parts = []
+    truth_offset = 0
     for h in range(a.hours):
         t0 = day0 + h * (3600 + BETWEEN_FLIGHT_GAP_S)
         n_steps = 3600 // step
@@ -92,7 +134,11 @@ def main():
             frames.append(make_flight(rng, icao, t0, n_steps, step))
         truth = pd.concat(frames, ignore_index=True)
         truth["hour"] = t0
-        noisy = add_noise(truth, rng)[COLUMNS]
+        truth[TRUTH_ID] = np.arange(
+            truth_offset, truth_offset + len(truth), dtype=np.int64
+        )
+        truth_offset += len(truth)
+        noisy = add_noise(truth, rng)[COLUMNS + [TRUTH_ID]]
         d = Path(a.out) / f"date={a.date}" / f"hour={h}"
         d.mkdir(parents=True, exist_ok=True)
         noisy.sort_values("time").to_parquet(d / "part-0.parquet", index=False)

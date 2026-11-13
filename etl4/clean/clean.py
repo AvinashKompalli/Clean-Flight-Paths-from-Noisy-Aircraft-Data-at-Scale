@@ -105,8 +105,13 @@ def clean(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
                 df[col].astype("string").str.strip().replace("", pd.NA)
             )
 
-    # 4. drop exact duplicates
+    # 4. drop exact duplicates. If a synthetic `__truth_id` column is
+    # present, deterministically prefer the lower id so round-trip tests
+    # can trace survivors back to ground truth. No-op on real-data paths
+    # where the column is absent.
     before = len(df)
+    if "__truth_id" in df.columns:
+        df = df.sort_values(DEDUP_KEYS + ["__truth_id"], kind="stable")
     df = df.drop_duplicates(subset=DEDUP_KEYS, keep="first")
     duplicates_dropped = before - len(df)
 

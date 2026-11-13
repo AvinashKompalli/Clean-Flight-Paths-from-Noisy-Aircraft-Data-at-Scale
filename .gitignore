@@ -39,6 +39,9 @@ etl4/data/
 # Runtime logs
 logs/
 
+# Project-level scratch (subagent smoke scripts etc. — not for commit)
+scratchpad/
+
 # Third-party installs (native Kafka, Java, etc.) — not project source
 software/
 
