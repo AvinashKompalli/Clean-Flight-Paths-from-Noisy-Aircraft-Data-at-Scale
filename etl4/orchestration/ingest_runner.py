@@ -65,7 +65,7 @@ def _live(limit: int, interval: float) -> dict:
     return {"rows_out": limit, "bytes_out": 0}
 
 
-def _zenodo(latest: bool) -> dict:
+def _zenodo(latest: bool, bulk_pull: bool) -> dict:
     raw   = ROOT / "data" / "raw"    / "opensky_flightlists"
     bronze = ROOT / "data" / "bronze" / "flightlists"
     raw_before    = _du_bytes(raw)
@@ -73,10 +73,16 @@ def _zenodo(latest: bool) -> dict:
     cmd = [sys.executable, "etl4/screpper.py", "--repo", "zenodo", "--download"]
     if latest:
         cmd += ["--latest"]
+    elif bulk_pull:
+        cmd += ["--bulk-pull"]
     if _run(cmd):
         raise RuntimeError("screpper zenodo download failed")
     if _run([sys.executable, "-m", "etl4.vault.bronze_flightlists"]):
         raise RuntimeError("bronze_flightlists conversion failed")
+    # rows_out is the full bronze tree, not the delta; tells the dashboard
+    # how much data has been materialised, which is the invariant that holds
+    # across idempotent re-invocations (SHA-256 skips mean bytes_out == 0
+    # on a re-run, but rows_out stays accurate).
     return {"rows_out":  _rows_in_tree(bronze),
             "bytes_out": _du_bytes(raw) - raw_before}
 
@@ -93,7 +99,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--source", required=True,
                    choices=["zenodo", "live", "replay"])
-    p.add_argument("--latest", action="store_true")
+    zsel = p.add_mutually_exclusive_group()
+    zsel.add_argument("--latest", action="store_true",
+                      help="zenodo: newest-dated file only")
+    zsel.add_argument("--bulk-pull", action="store_true",
+                      help="zenodo: every file in the record "
+                           "(SHA-256 idempotent, skips what is already on disk)")
     p.add_argument("--speed", default="max")
     p.add_argument("--limit", type=int, default=50000)
     p.add_argument("--interval", type=float, default=5.0,
@@ -106,7 +117,7 @@ def main():
                     extras={"speed": a.speed, "limit": a.limit,
                             "interval": a.interval}) as rec:
         if a.source == "zenodo":
-            out = _zenodo(a.latest)
+            out = _zenodo(a.latest, a.bulk_pull)
         elif a.source == "live":
             out = _live(a.limit, a.interval)
         else:
