@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://etl4.iisc/schemas/task.schema.json",
+  "title": "Task",
+  "type": "object",
+  "required": ["task_id", "project_id", "assigned_agent", "status", "prerequisites", "acceptance_criteria", "retry_limit"],
+  "properties": {
+    "task_id":  {"type": "string", "pattern": "^T-[0-9]{3,}$"},
+    "project_id": {"type": "string"},
+    "assigned_agent": {"type": "string"},
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+    "prerequisites": {"type": "array", "items": {"type": "string"}},
+    "input_artifacts": {"type": "array", "items": {"type": "string"}},
+    "expected_output": {"type": "string"},
+    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+    "priority": {"type": "string", "enum": ["low", "medium", "high", "blocker"]},
+    "status": {"type": "string", "enum": ["PENDING", "READY", "RUNNING", "BLOCKED", "UNDER_REVIEW", "APPROVED", "NEEDS_CHANGES", "REJECTED", "FAILED", "COMPLETED"]},
+    "retry_count": {"type": "integer", "minimum": 0},
+    "retry_limit": {"type": "integer", "minimum": 0},
+    "deadline_utc": {"type": "string", "format": "date-time"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "updated_at_utc": {"type": "string", "format": "date-time"}
+  }
+}

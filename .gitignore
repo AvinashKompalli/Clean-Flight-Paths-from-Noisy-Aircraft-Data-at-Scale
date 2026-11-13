@@ -7,9 +7,12 @@ __pycache__/
 
 # IDE / tooling
 .vscode/
-.claude/
+.claude/*
 CLAUDE.md
 .DS_Store
+# ... but share the multi-agent org that the team uses
+!.claude/agents/
+!.claude/commands/
 
 # Archives / downloads
 *.zip
