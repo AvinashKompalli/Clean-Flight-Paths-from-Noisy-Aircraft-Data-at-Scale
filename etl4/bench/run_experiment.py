@@ -22,7 +22,7 @@ from etl4.evaluate import (
     position_rmse_m, segmentation_prf, boundary_time_error_s,
     coverage_ratio, continuity_ratio,
 )
-from etl4.bench.noise import inject_noise
+from etl4.bench.noise import inject_noise, NoiseTruth
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNS_CSV = ROOT / "data" / "eval" / "runs.csv"
@@ -43,7 +43,7 @@ def prepare_silver(bronze: pd.DataFrame, noise: str, source: str,
     """
     df = project_raw(bronze, source=source)
     if noise != "N0":
-        df = inject_noise(df, noise)
+        df, _noise_truth = inject_noise(df, noise)  # T-003 will consume this
     df, rejected = clean(df)
     df = event_time_order(df)
     if write_silver_dir is not None:
