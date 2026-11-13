@@ -22,9 +22,19 @@ etl4/.env
 # Pipeline outputs — regenerated from source + raw downloads
 data/raw/
 data/bronze/
+data/silver/
+data/gold/
 data/eval/
 data/reference/synthetic_truth/
 etl4/data/
+
+# Transient build state (shards, DuckDB spill, done sentinels)
+**/_shards/
+**/_duckdb_tmp/
+**/_DONE
+
+# Runtime logs
+logs/
 
 # Third-party installs (native Kafka, Java, etc.) — not project source
 software/
