@@ -4,15 +4,17 @@ Chains every stage from fresh Zenodo ingest to the final `fact_experiment_result
 mart in Postgres, so one command reproduces the whole showcase.
 
 Stages, in order:
-  1. infra         docker compose up (postgres, kafka, grafana, prometheus, ...)
-  2. schema        create_tables.sql
-  3. ingest        Zenodo pull via orchestration/ingest_runner  (telemetry -> ingest_runs)
-  4. bronze        bronze_flightlists conversion
-  5. vault         raw Data Vault 2.0 build
-  6. marts         dim_aircraft, dim_airport, fact_flight, fact_trajectory_enriched
-  7. sink          COPY marts into Postgres
-  8. matrix        3-method x N-noise reconstruction matrix  (telemetry -> pipeline_runs + eval_results)
-  9. eval_mart     fact_experiment_result mart (pivot of pipeline_runs x eval_results)
+   1. infra        docker compose up (postgres, kafka, grafana, prometheus, ...)
+   2. schema       create_tables.sql
+   3. ingest       Zenodo pull via orchestration/ingest_runner  (telemetry -> ingest_runs)
+   4. bronze       bronze_flightlists conversion
+   5. vault        raw Data Vault 2.0 build
+   6. marts        dim_aircraft, dim_airport, fact_flight, fact_trajectory_enriched
+   7. qa           Great Expectations suites against vault/marts  (non-zero exit on failure)
+   8. sink         COPY marts into Postgres
+   9. reconcile    row-count reconciliation bronze -> vault -> marts  (gates matrix)
+  10. matrix       3-method x N-noise reconstruction matrix  (telemetry -> pipeline_runs + eval_results)
+  11. eval_mart    fact_experiment_result mart (pivot of pipeline_runs x eval_results)
 
 Usage:
   python etl4/run_e2e.py                               # everything, zenodo ingest
@@ -34,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
 STAGES = ["infra", "schema", "ingest", "bronze", "vault",
-          "marts", "sink", "matrix", "eval_mart"]
+          "marts", "qa", "sink", "reconcile", "matrix", "eval_mart"]
 
 
 def _run(name: str, cmd: list[str], shell: bool = False) -> float:
@@ -82,8 +84,16 @@ def stage_marts():
     _run("marts", [PY, "-m", "etl4.vault.marts"])
 
 
+def stage_qa():
+    _run("qa", [PY, "-m", "etl4.qa.validate"])
+
+
 def stage_sink():
     _run("sink", [PY, "-m", "etl4.vault.postgres_sink"])
+
+
+def stage_reconcile():
+    _run("reconcile", [PY, "-m", "etl4.qa.reconcile"])
 
 
 def stage_matrix(profiles: list[str], bronze: str):
@@ -190,7 +200,9 @@ def main():
     if "bronze"    in run: stage_bronze()
     if "vault"     in run: stage_vault()
     if "marts"     in run: stage_marts()
+    if "qa"        in run: stage_qa()
     if "sink"      in run: stage_sink()
+    if "reconcile" in run: stage_reconcile()
     if "matrix"    in run: stage_matrix(a.profiles, a.bronze)
     if "eval_mart" in run: stage_eval_mart()
 
