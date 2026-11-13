@@ -64,8 +64,10 @@ _REST_TO_BRONZE = {
 }
 _BRONZE_COLS = ["time", "icao24", "lat", "lon", "velocity", "heading",
                 "vertrate", "callsign", "onground", "alert", "spi", "squawk",
-                "baroaltitude", "geoaltitude", "lastposupdate", "lastcontact",
-                "hour"]
+                "baroaltitude", "geoaltitude", "lastposupdate", "lastcontact"]
+# hour-of-day is a partition-layout key (directory name); never written into
+# the parquet file. clean.py recomputes a UNIX hour-start when downstream
+# needs it, so the file keeps a single source of truth for hour.
 
 
 def _record_to_bronze_row(rec: dict) -> dict | None:
@@ -80,7 +82,9 @@ def _record_to_bronze_row(rec: dict) -> dict | None:
     row["icao24"] = str(row["icao24"]).lower()
     if row.get("callsign") is not None:
         row["callsign"] = str(row["callsign"]).strip()
-    row["hour"] = datetime.fromtimestamp(int(snap), timezone.utc).hour
+    # hour-of-day stays as a transient key for the per-hour groupby in _flush;
+    # it is not stored in the parquet (see _BRONZE_COLS).
+    row["_hour_partition"] = datetime.fromtimestamp(int(snap), timezone.utc).hour
     return row
 
 
@@ -88,18 +92,17 @@ def _flush(buf: list[dict], consumer) -> tuple[int, int]:
     """Write buffered rows to bronze partition(s) and commit offsets."""
     if not buf:
         return 0, 0
-    df = pd.DataFrame(buf, columns=_BRONZE_COLS)
-    df["icao24"]   = df["icao24"].astype("string")
-    df["callsign"] = df["callsign"].astype("string")
+    raw = pd.DataFrame(buf)
+    raw["icao24"]   = raw["icao24"].astype("string")
+    raw["callsign"] = raw["callsign"].astype("string")
 
     total_bytes = 0
-    for (date, hour), part in df.groupby(
-        [pd.to_datetime(df["time"], unit="s", utc=True).dt.strftime("%Y-%m-%d"),
-         df["hour"]]
-    ):
+    partition_date = pd.to_datetime(raw["time"], unit="s", utc=True).dt.strftime("%Y-%m-%d")
+    for (date, hour), part in raw.groupby([partition_date, raw["_hour_partition"]]):
         out = BRONZE / f"date={date}" / f"hour={hour}" / f"part-{int(time.time()*1000)}.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
-        part.to_parquet(out, index=False)
+        # Store only the bronze schema columns; hour is in the path, not the file.
+        part[_BRONZE_COLS].to_parquet(out, index=False)
         total_bytes += out.stat().st_size
 
     consumer.commit(asynchronous=False)

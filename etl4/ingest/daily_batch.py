@@ -51,8 +51,9 @@ _REST_TO_BRONZE = {
 
 _BRONZE_COLS = ["time", "icao24", "lat", "lon", "velocity", "heading",
                 "vertrate", "callsign", "onground", "alert", "spi", "squawk",
-                "baroaltitude", "geoaltitude", "lastposupdate", "lastcontact",
-                "hour"]
+                "baroaltitude", "geoaltitude", "lastposupdate", "lastcontact"]
+# hour-of-day is a partition-path key, not an in-file column (see
+# kafka_bronze_consumer.py for the matching convention).
 
 
 def poll_once(session) -> pd.DataFrame:
@@ -75,7 +76,6 @@ def poll_once(session) -> pd.DataFrame:
     df["callsign"] = df["callsign"].astype("string").str.strip()
     df["time"] = snapshot_ts
     df["alert"] = pd.NA
-    df["hour"] = datetime.fromtimestamp(snapshot_ts, timezone.utc).hour
     return df[_BRONZE_COLS]
 
 
