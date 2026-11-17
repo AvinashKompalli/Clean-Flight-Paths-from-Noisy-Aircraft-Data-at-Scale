@@ -33,6 +33,7 @@ class NoiseTruth:
     profile: str
     seed: int
     original_row_count: int
+    original_ids: frozenset
     original_coords: pd.DataFrame
     dropped_ids: frozenset
     duplicated_ids: frozenset
@@ -41,7 +42,11 @@ class NoiseTruth:
     true_boundaries: list  # list[tuple[str, int]] of (icao24, time) at flight starts
 
     def surviving_ids(self) -> frozenset:
-        return frozenset(range(self.original_row_count)) - self.dropped_ids
+        # Correct across sparse / pre-sparsified __truth_id inputs:
+        # survivors = exact input ids minus those dropped by the injector.
+        # The earlier range(original_row_count) formula broke when upstream
+        # synthetic.add_noise pre-sparsified the id set.
+        return self.original_ids - self.dropped_ids
 
 
 def _infer_boundaries(df: pd.DataFrame) -> list:
@@ -163,6 +168,7 @@ def inject_noise(
         profile=profile,
         seed=seed,
         original_row_count=original_row_count,
+        original_ids=original_ids_set,
         original_coords=original_coords,
         dropped_ids=dropped_ids,
         duplicated_ids=duplicated_ids,
