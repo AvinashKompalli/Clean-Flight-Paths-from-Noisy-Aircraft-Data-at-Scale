@@ -1,0 +1,315 @@
+{
+  "annotations": {"list": []},
+  "description": "WI-1 headline dashboard: accuracy vs cost across (method, noise) cells plus the scale curves from scale_runs. Synthetic-path cells carry rmse_m and seg_* values; real-data cells drop out of v_pareto_frontier by design. Panels render gracefully on empty data and auto-populate once T-003 metric wiring lands and the matrix reruns.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "uid": "etl4-accuracy-cost",
+  "title": "ETL4 - Accuracy vs Cost (WI-1)",
+  "tags": ["etl4", "wi-1", "pareto", "accuracy-cost", "scale"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "2026-01-01", "to": "now"},
+  "templating": {"list": []},
+  "panels": [
+    {
+      "type": "text",
+      "id": 1,
+      "title": "Accuracy-cost trade-off - PDF headline question",
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 5},
+      "options": {
+        "mode": "markdown",
+        "content": "## How much accuracy can be gained by incorporating aircraft kinematics, and what computational cost is required at large scale?\n\nEach cell in the metric matrix is one (method, noise) experiment. Synthetic-path cells carry rmse_m, seg_precision, seg_recall, seg_f1, coverage_ratio, and boundary_err_s because the generator retains a ground-truth sidecar. Real-data cells (s3, rest) have no ground truth and are filtered out of the Pareto view on purpose. Empty panels below mean the matrix has not yet been rerun under the new metric wiring; once the next run writes to fact_experiment_result and scale_runs, the charts fill in without a dashboard edit."
+      }
+    },
+    {
+      "type": "xychart",
+      "id": 2,
+      "title": "Pareto scatter - accuracy (rmse_m) vs cost (wall_secs)",
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 11},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, CASE noise WHEN 'N0' THEN 'Clean' WHEN 'N1' THEN 'Light' WHEN 'N2' THEN 'Moderate' WHEN 'N3' THEN 'Heavy' END AS regime, accuracy_y AS rmse_m, cost_x AS wall_secs FROM v_pareto_frontier ORDER BY noise, method;"
+        }
+      ],
+      "options": {
+        "mapping": "auto",
+        "seriesMapping": "auto",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "single"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "show": "points",
+            "pointSize": {"fixed": 8},
+            "axisPlacement": "auto",
+            "scaleDistribution": {"type": "log", "log": 10}
+          },
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "wall_secs"},
+            "properties": [
+              {"id": "unit", "value": "s"}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "rmse_m"},
+            "properties": [
+              {"id": "unit", "value": "m"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "id": 3,
+      "title": "Metric heatmap - seg_f1 by method x noise (falls back to continuity when seg_f1 is NULL)",
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 11},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, MAX(CASE WHEN noise = 'N0' THEN COALESCE(seg_f1, continuity) END) AS \"Clean\", MAX(CASE WHEN noise = 'N1' THEN COALESCE(seg_f1, continuity) END) AS \"Light\", MAX(CASE WHEN noise = 'N2' THEN COALESCE(seg_f1, continuity) END) AS \"Moderate\", MAX(CASE WHEN noise = 'N3' THEN COALESCE(seg_f1, continuity) END) AS \"Heavy\" FROM fact_experiment_result GROUP BY method ORDER BY method;"
+        }
+      ],
+      "options": {"showHeader": true, "cellHeight": "md"},
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "center", "cellOptions": {"type": "color-background", "mode": "gradient"}},
+          "unit": "percentunit",
+          "min": 0.0,
+          "max": 1.0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.7},
+              {"color": "yellow", "value": 0.85},
+              {"color": "green", "value": 0.95}
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "method"},
+            "properties": [
+              {"id": "custom.cellOptions", "value": {"type": "auto"}},
+              {"id": "custom.align", "value": "left"},
+              {"id": "unit", "value": "string"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "xychart",
+      "id": 4,
+      "title": "Throughput scale curve - rows_per_sec vs data_volume_rows",
+      "gridPos": {"x": 0, "y": 16, "w": 8, "h": 9},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, data_volume_rows AS volume, rows_per_sec FROM scale_runs WHERE wall_secs IS NOT NULL ORDER BY method, data_volume_rows;"
+        }
+      ],
+      "options": {
+        "mapping": "auto",
+        "seriesMapping": "auto",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "single"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "show": "lines+points",
+            "pointSize": {"fixed": 6},
+            "lineWidth": 2,
+            "scaleDistribution": {"type": "log", "log": 10}
+          },
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "rows_per_sec"},
+            "properties": [
+              {"id": "unit", "value": "rowsps"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "xychart",
+      "id": 5,
+      "title": "Latency scale curve - wall_secs vs data_volume_rows",
+      "gridPos": {"x": 8, "y": 16, "w": 8, "h": 9},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, data_volume_rows AS volume, wall_secs FROM scale_runs WHERE wall_secs IS NOT NULL ORDER BY method, data_volume_rows;"
+        }
+      ],
+      "options": {
+        "mapping": "auto",
+        "seriesMapping": "auto",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "single"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "show": "lines+points",
+            "pointSize": {"fixed": 6},
+            "lineWidth": 2,
+            "scaleDistribution": {"type": "log", "log": 10}
+          },
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "wall_secs"},
+            "properties": [
+              {"id": "unit", "value": "s"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "xychart",
+      "id": 6,
+      "title": "Memory scale curve - peak_rss_mb vs data_volume_rows",
+      "gridPos": {"x": 16, "y": 16, "w": 8, "h": 9},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, data_volume_rows AS volume, peak_rss_mb FROM scale_runs WHERE wall_secs IS NOT NULL ORDER BY method, data_volume_rows;"
+        }
+      ],
+      "options": {
+        "mapping": "auto",
+        "seriesMapping": "auto",
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "single"}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "show": "lines+points",
+            "pointSize": {"fixed": 6},
+            "lineWidth": 2,
+            "scaleDistribution": {"type": "log", "log": 10}
+          },
+          "color": {"mode": "palette-classic"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "peak_rss_mb"},
+            "properties": [
+              {"id": "unit", "value": "decmbytes"}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "id": 7,
+      "title": "Skip-and-log evidence - scale_runs rows carrying notes (proves the kinematic_smoothing@50M gate fired)",
+      "gridPos": {"x": 0, "y": 25, "w": 12, "h": 9},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT method, data_volume_rows, notes, recorded_at FROM scale_runs WHERE notes IS NOT NULL ORDER BY recorded_at DESC LIMIT 20;"
+        }
+      ],
+      "options": {"showHeader": true, "cellHeight": "sm"},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "data_volume_rows"},
+            "properties": [{"id": "unit", "value": "short"}]
+          }
+        ]
+      }
+    },
+    {
+      "type": "bargauge",
+      "id": 8,
+      "title": "Metric completeness - populated cells per metric (out of total pipeline_runs)",
+      "gridPos": {"x": 12, "y": 25, "w": 12, "h": 9},
+      "datasource": {"type": "postgres", "uid": "Postgres"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "datasource": {"type": "postgres", "uid": "Postgres"},
+          "rawSql": "SELECT metric, count(value) FILTER (WHERE value IS NOT NULL) AS populated, (SELECT count(*) FROM pipeline_runs) AS total_cells FROM eval_results WHERE metric IN ('position_rmse_m', 'seg_f1', 'seg_precision', 'seg_recall', 'coverage_ratio', 'boundary_err_s') GROUP BY metric ORDER BY metric;"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "showUnfilled": true,
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^populated$/", "values": false},
+        "legend": {"displayMode": "list", "placement": "bottom", "showLegend": false}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "yellow", "value": 6},
+              {"color": "green", "value": 12}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "text",
+      "id": 9,
+      "title": "How to read these panels",
+      "gridPos": {"x": 0, "y": 34, "w": 24, "h": 7},
+      "options": {
+        "mode": "markdown",
+        "content": "**Pareto scatter.** One point per (method, noise) synthetic cell. Lower-left is better (lower rmse_m and lower wall_secs). Both axes are log so order-of-magnitude differences between methods are visible without clipping. Real-data cells do not appear because v_pareto_frontier filters rmse_m IS NOT NULL.\n\n**Scale curves.** rows_per_sec, wall_secs, and peak_rss_mb as a function of data_volume_rows. One line per method. Expect throughput to flatten and memory to grow as volume increases. A missing kinematic_smoothing point at 50M is the skip-and-log gate firing (projected peak_rss_mb above 12 GB) and is visible in the evidence table below.\n\n**Empty-state behaviour.** If the Pareto scatter and heatmap show no data, the fact_experiment_result mart has not been rerun since the T-003 metric wiring landed. Re-run the matrix on the synthetic bronze and refresh. If scale curves are empty, run etl4/bench/scale_study.py to populate scale_runs."
+      }
+    }
+  ]
+}

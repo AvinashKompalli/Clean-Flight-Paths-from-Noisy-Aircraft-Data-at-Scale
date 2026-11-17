@@ -116,28 +116,39 @@ def stage_eval_mart():
     out = ROOT / "data" / "gold" / "marts" / "fact_experiment_result" / "part.parquet"
     dsn = "postgresql://etl4:change_me@localhost:5432/etl4"
 
+    # Latest row per (source, method, noise) across any source (synthetic + s3 + rest).
+    # Earlier filter `WHERE source='s3'` excluded the WI-1 synthetic matrix from the
+    # mart; relaxed so Pareto + metric heatmap panels see every populated cell.
+    # `position_rmse_m` matches the T-003-era metric key written by metrics.py.
     pivot = """
     WITH latest AS (
-      SELECT DISTINCT ON (noise, method) run_id, run_date, source, method, noise,
+      SELECT DISTINCT ON (source, noise, method) run_id, run_date, source, method, noise,
              rows_in, rows_out, wall_secs, started_at
         FROM pipeline_runs
-       WHERE source = 's3'
-       ORDER BY noise, method, started_at DESC
+       ORDER BY source, noise, method, started_at DESC
     )
     SELECT l.run_id, l.run_date, l.source, l.method, l.noise,
            l.rows_in, l.rows_out, l.wall_secs, l.started_at,
-           MAX(CASE WHEN er.metric='continuity'   THEN er.value END) AS continuity,
-           MAX(CASE WHEN er.metric='n_flights'    THEN er.value END) AS n_flights,
-           MAX(CASE WHEN er.metric='n_deviations' THEN er.value END) AS n_deviations,
-           MAX(CASE WHEN er.metric='rmse_m'       THEN er.value END) AS rmse_m,
-           MAX(CASE WHEN er.metric='seg_f1'       THEN er.value END) AS seg_f1
+           MAX(CASE WHEN er.metric='continuity'      THEN er.value END) AS continuity,
+           MAX(CASE WHEN er.metric='n_flights'       THEN er.value END) AS n_flights,
+           MAX(CASE WHEN er.metric='n_deviations'    THEN er.value END) AS n_deviations,
+           MAX(CASE WHEN er.metric='position_rmse_m' THEN er.value END) AS rmse_m,
+           MAX(CASE WHEN er.metric='seg_f1'          THEN er.value END) AS seg_f1,
+           MAX(CASE WHEN er.metric='seg_precision'   THEN er.value END) AS seg_precision,
+           MAX(CASE WHEN er.metric='seg_recall'      THEN er.value END) AS seg_recall,
+           MAX(CASE WHEN er.metric='coverage_ratio'  THEN er.value END) AS coverage_ratio,
+           MAX(CASE WHEN er.metric='boundary_err_s'  THEN er.value END) AS boundary_err_s
       FROM latest l
       LEFT JOIN eval_results er USING(run_id)
      GROUP BY l.run_id, l.run_date, l.source, l.method, l.noise,
               l.rows_in, l.rows_out, l.wall_secs, l.started_at
-     ORDER BY l.noise, l.method
+     ORDER BY l.source, l.noise, l.method
     """
+    # DROP VIEW first: v_pareto_frontier (added by T-004) depends on
+    # fact_experiment_result, so a bare DROP TABLE fails. Recreate the view
+    # at the tail so the dependency restores idempotently.
     ddl = """
+    DROP VIEW IF EXISTS v_pareto_frontier;
     DROP TABLE IF EXISTS fact_experiment_result;
     CREATE TABLE fact_experiment_result (
       run_id INTEGER PRIMARY KEY, run_date DATE, source TEXT,
@@ -145,13 +156,26 @@ def stage_eval_mart():
       wall_secs DOUBLE PRECISION, started_at TIMESTAMPTZ,
       continuity DOUBLE PRECISION, n_flights DOUBLE PRECISION,
       n_deviations DOUBLE PRECISION, rmse_m DOUBLE PRECISION,
-      seg_f1 DOUBLE PRECISION);
+      seg_f1 DOUBLE PRECISION, seg_precision DOUBLE PRECISION,
+      seg_recall DOUBLE PRECISION, coverage_ratio DOUBLE PRECISION,
+      boundary_err_s DOUBLE PRECISION);
     CREATE INDEX idx_fer_method ON fact_experiment_result(method);
     CREATE INDEX idx_fer_noise  ON fact_experiment_result(noise);
     """
+    view_ddl = """
+    CREATE OR REPLACE VIEW v_pareto_frontier AS
+    SELECT fer.method, fer.noise,
+           fer.rmse_m         AS accuracy_y,
+           fer.wall_secs      AS cost_x,
+           CASE WHEN fer.wall_secs > 0 THEN fer.rmse_m / fer.wall_secs ELSE NULL END AS efficiency
+      FROM fact_experiment_result fer
+     WHERE fer.rmse_m IS NOT NULL
+       AND fer.wall_secs IS NOT NULL;
+    """
     cols = ["run_id","run_date","source","method","noise","rows_in","rows_out",
             "wall_secs","started_at","continuity","n_flights","n_deviations",
-            "rmse_m","seg_f1"]
+            "rmse_m","seg_f1","seg_precision","seg_recall","coverage_ratio",
+            "boundary_err_s"]
 
     with psycopg.connect(dsn) as conn:
         df = pd.read_sql(pivot, conn)
@@ -168,6 +192,9 @@ def stage_eval_mart():
         with cur.copy(f"COPY fact_experiment_result ({', '.join(cols)}) "
                       f"FROM STDIN WITH (FORMAT csv, NULL '')") as cp:
             cp.write(buf.read())
+        for stmt in view_ddl.strip().split(";"):
+            if stmt.strip():
+                cur.execute(stmt)
 
     wall = time.perf_counter() - t0
     print(f"eval_mart: ok  rows={len(df)}  elapsed={wall:.1f}s", flush=True)

@@ -61,13 +61,14 @@ def _silver_path(source: str, noise: str) -> Path:
 
 def _worker(args: tuple) -> dict:
     """ProcessPool entry: read silver parquet, run method, return metrics."""
-    silver_path, truth_path, method, noise, source, rows_in = args
+    silver_path, truth_path, method, noise, source, rows_in, noise_truth = args
     silver = pd.read_parquet(silver_path)
     truth  = pd.read_parquet(truth_path) if truth_path else None
     return reconstruct_from_silver(
         silver, method, noise, source,
         truth=truth, rows_in=rows_in,
         write_gold_dir=GOLD_DIR,
+        noise_truth=noise_truth,
     )
 
 
@@ -91,11 +92,19 @@ def main():
     print(f"\n[pass 1] prepare silver for {len(a.profiles)} noise profile(s)",
           flush=True)
     t1 = time.perf_counter()
+    noise_truths: dict = {}
     for noise in a.profiles:
         tn = time.perf_counter()
-        silver, _rejected = prepare_silver(
+        silver, _rejected, noise_truth = prepare_silver(
             bronze, noise, a.source, write_silver_dir=SILVER_DIR,
         )
+        # Cache the frozen NoiseTruth so pass-2 workers receive the real
+        # jumped_ids / shuffled_ids / duplicated_ids from pass 1. The ADR
+        # says "no disk persistence"; in-memory hand-off through pickled
+        # ProcessPool args is in-memory. Scope to synthetic only -- real
+        # sources either skip inject_noise entirely (N0) or produce a
+        # NoiseTruth with no ground-truth interpretation.
+        noise_truths[noise] = noise_truth if a.source == "synthetic" else None
         print(f"  silver  noise={noise}  rows={len(silver):,}  "
               f"wall={time.perf_counter() - tn:.1f}s  -> "
               f"{_silver_path(a.source, noise).relative_to(ROOT)}", flush=True)
@@ -112,6 +121,7 @@ def main():
             noise,
             a.source,
             rows_in,
+            noise_truths.get(noise),
         )
         for noise, method in itertools.product(a.profiles, a.methods)
     ]
@@ -133,6 +143,14 @@ def main():
         })
         if run_id:
             print(f"    [postgres run_id={run_id}]", flush=True)
+        def _r(key, digits):
+            v = m.get(key)
+            if v is None:
+                return float("nan")
+            try:
+                return round(float(v), digits)
+            except (TypeError, ValueError):
+                return float("nan")
         rows.append({
             "noise":      m["noise"],
             "method":     m["method"],
@@ -141,9 +159,9 @@ def main():
             "deviations": m["n_deviations"],
             "continuity": round(m["continuity"], 4),
             "rows_out":   m["rows_out"],
-            "rmse_m":     round(m.get("position_rmse_m", float("nan")), 1),
-            "seg_f1":     round(m.get("seg_f1", float("nan")), 3),
-            "coverage":   round(m.get("coverage_ratio", float("nan")), 3),
+            "rmse_m":     _r("position_rmse_m", 1),
+            "seg_f1":     _r("seg_f1", 3),
+            "coverage":   _r("coverage_ratio", 3),
         })
         MATRIX_CSV.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_csv(MATRIX_CSV, index=False)

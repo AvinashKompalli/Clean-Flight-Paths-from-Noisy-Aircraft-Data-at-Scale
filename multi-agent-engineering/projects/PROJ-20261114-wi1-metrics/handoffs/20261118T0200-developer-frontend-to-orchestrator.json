@@ -1,0 +1,92 @@
+{
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "task_id": "T-006",
+  "from_agent": "developer-frontend",
+  "to_agent": "orchestrator",
+  "phase": "IMPLEMENTATION",
+  "timestamp_utc": "2026-11-18T02:00:00Z",
+  "status": "APPROVED",
+  "objective": "New Grafana dashboard rendering the WI-1 accuracy-cost question: Pareto scatter from v_pareto_frontier, metric heatmap on fact_experiment_result, scale curves from scale_runs, skip-and-log evidence table, metric completeness bargauge.",
+  "files_changed": [
+    {
+      "path": "etl4/dashboard/08_accuracy_cost.json",
+      "change": "added",
+      "summary": "9-panel dashboard (uid etl4-accuracy-cost, title 'ETL4 - Accuracy vs Cost (WI-1)', tags etl4/wi-1/pareto/accuracy-cost/scale, refresh 30s, time 2026-01-01 to now). Panels in grid order: (1) hero markdown, (2) Pareto xychart scatter log-log, (3) metric heatmap pivoted table with gradient cell background, (4) throughput scale curve xychart log-log, (5) latency scale curve xychart log-log, (6) memory scale curve xychart log-log, (7) skip-and-log evidence table, (8) metric completeness bargauge, (9) reviewer explainer markdown."
+    }
+  ],
+  "panel_titles": [
+    "Accuracy-cost trade-off - PDF headline question",
+    "Pareto scatter - accuracy (rmse_m) vs cost (wall_secs)",
+    "Metric heatmap - seg_f1 by method x noise (falls back to continuity when seg_f1 is NULL)",
+    "Throughput scale curve - rows_per_sec vs data_volume_rows",
+    "Latency scale curve - wall_secs vs data_volume_rows",
+    "Memory scale curve - peak_rss_mb vs data_volume_rows",
+    "Skip-and-log evidence - scale_runs rows carrying notes (proves the kinematic_smoothing@50M gate fired)",
+    "Metric completeness - populated cells per metric (out of total pipeline_runs)",
+    "How to read these panels"
+  ],
+  "data_sources": {
+    "postgres_tables": ["v_pareto_frontier", "fact_experiment_result", "scale_runs", "eval_results", "pipeline_runs"],
+    "prometheus_metrics": []
+  },
+  "commands_run": [
+    {"cmd": "python -I -c \"import json; d=json.load(open('etl4/dashboard/08_accuracy_cost.json')); print(len(d['panels']), d['uid'])\"", "exit": 0, "output": "9 etl4-accuracy-cost"},
+    {"cmd": "python -I (cp1252 and em-dash / ASCII arrow / smart-quote scan)", "exit": 0, "output": "cp1252_safe: True; no disallowed chars"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 2 rawSql>", "exit": 0, "output": "0 rows (pre-T-003 matrix rerun; fact_experiment_result has rmse_m NULL in all 12 rows)"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 3 rawSql>", "exit": 0, "output": "3 rows (one per method; cells carry continuity fallback since seg_f1 is still NULL)"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 4 rawSql>", "exit": 0, "output": "0 rows (scale_runs empty pre-T-005 end-to-end run)"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 5 rawSql>", "exit": 0, "output": "0 rows"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 6 rawSql>", "exit": 0, "output": "0 rows"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 7 rawSql>", "exit": 0, "output": "0 rows"},
+    {"cmd": "docker exec etl4-postgres psql ... <panel 8 rawSql>", "exit": 0, "output": "6 rows (one per metric; populated=19 out of 40 cells from the WI-1 Wave-2 smoke runs)"},
+    {"cmd": "curl -s -u admin:admin http://localhost:3000/api/search?type=dash-db", "exit": 0, "output": "etl4-accuracy-cost | ETL4 - Accuracy vs Cost (WI-1) | ETL4"},
+    {"cmd": "curl -s -u admin:admin http://localhost:3000/api/dashboards/uid/etl4-accuracy-cost", "exit": 0, "output": "meta.folderTitle=ETL4, meta.url=/d/etl4-accuracy-cost/etl4-accuracy-vs-cost-wi-1, dashboard.panels_count=9"}
+  ],
+  "verification_outputs": {
+    "json_parse": "panels=9 uid=etl4-accuracy-cost title='ETL4 - Accuracy vs Cost (WI-1)' tags=['etl4','wi-1','pareto','accuracy-cost','scale'] refresh=30s time={'from':'2026-01-01','to':'now'}",
+    "cp1252_safety": "True; scanned for em-dash, en-dash, right-arrow, horizontal-ellipsis, smart-quotes, ASCII '->' - none present",
+    "sql_smoke_per_panel": {
+      "panel_2_pareto_scatter": "exit 0, 0 rows (v_pareto_frontier filters rmse_m IS NOT NULL AND wall_secs IS NOT NULL; expected empty pre-matrix-rerun)",
+      "panel_3_metric_heatmap": "exit 0, 3 rows (method x Clean/Light/Moderate/Heavy pivot; falls back to continuity 0.998 -> 0.898 across noise)",
+      "panel_4_throughput_curve": "exit 0, 0 rows",
+      "panel_5_latency_curve": "exit 0, 0 rows",
+      "panel_6_memory_curve": "exit 0, 0 rows",
+      "panel_7_skip_log_table": "exit 0, 0 rows",
+      "panel_8_completeness": "exit 0, 6 rows (position_rmse_m / seg_f1 / seg_precision / seg_recall / coverage_ratio / boundary_err_s all show populated=19 out of total_cells=40)"
+    },
+    "grafana_discovery": "/api/search returned etl4-accuracy-cost in ETL4 folder; /api/dashboards/uid/etl4-accuracy-cost returned 9 panels and the expected folder/url meta"
+  },
+  "contract_deviations": [
+    {
+      "object": "Panel 8 Metric completeness",
+      "flavour": "panel-shape",
+      "issue": "Task text said 'stat panel tile row ... One stat per metric'. Implemented as a single bargauge with one tile per metric so the overall dashboard panel count stays at 9 (within the stated 8-10 range). A row of 6 individual stat panels would push the total to 14.",
+      "resolution": "applied-per-intent, panel-count-constraint"
+    },
+    {
+      "object": "Panel 8 data source",
+      "flavour": "table-choice",
+      "issue": "Task text named 'fact_experiment_result' as the source. That mart only carries rmse_m and seg_f1 columns; seg_precision, seg_recall, coverage_ratio, and boundary_err_s land in eval_results via sink/postgres.py::_PERSISTED_METRICS. Query targets eval_results joined to pipeline_runs for the total-cells denominator so all 6 metrics are counted. Verified: distinct eval_results.metric contains all 6 names.",
+      "resolution": "applied-per-data-shape"
+    },
+    {
+      "object": "Panel 2 Pareto scatter and panels 4-6 scale curves",
+      "flavour": "panel-type",
+      "issue": "Task allowed 'xychart OR timeseries with time disabled'. Chose xychart with log-log scaleDistribution so order-of-magnitude differences between methods remain visible without clipping on empty / sparse data.",
+      "resolution": "selected-xychart"
+    }
+  ],
+  "windows_cp1252_safe": true,
+  "secrets_scan": "clean (no credentials in dashboard JSON; only SQL and rendering config)",
+  "next_action": "T-008 (functional-tester) can run the full 3x4 matrix on synthetic volume to populate fact_experiment_result and scale_runs; dashboard panels will auto-populate on the next 30-second Grafana poll. No further frontend work required unless T-008 surfaces a rendering defect.",
+  "risks": [
+    "Pareto scatter is empty right now because fact_experiment_result still has rmse_m NULL on all 12 rows. T-003 wired the metrics into eval_results and pipeline_runs but the mart (fact_experiment_result) still carries the old pre-rerun shape. The dashboard renders without error; it just shows an empty scatter until the matrix is rerun end-to-end on the synthetic bronze and the mart refreshed.",
+    "scale_runs is empty pre T-005-full-run; all four scale panels (throughput, latency, memory, skip-and-log) are empty until etl4/bench/scale_study.py runs against a real bronze and inserts rows.",
+    "xychart panel type is Grafana-10.4-specific. If the deployment is downgraded below 10.0 the panel falls back to a 'Panel plugin not found' warning. Not a concern for the current 10.4.5 stack.",
+    "Metric heatmap pivots via MAX(CASE WHEN noise=...) per column. If a method has multiple runs in a single noise regime the latest run does not dominate; MAX does. For the current one-run-per-cell shape this is identical to 'latest'; if multi-run becomes a thing, swap MAX for a (SELECT value ORDER BY started_at DESC LIMIT 1) subquery."
+  ],
+  "artifacts": [
+    "etl4/dashboard/08_accuracy_cost.json",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/tasks/T-006.json"
+  ]
+}

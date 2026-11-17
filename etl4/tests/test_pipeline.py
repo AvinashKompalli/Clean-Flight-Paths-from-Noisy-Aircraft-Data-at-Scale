@@ -226,24 +226,37 @@ def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
     csv_path = tmp_path / "matrix.csv"
     calls = {"n": 0}
 
-    def fake_run(bronze, method, truth=None, noise="N0", source="synthetic"):
+    def fake_prepare_silver(bronze, noise, source, write_silver_dir=None):
+        silver = pd.DataFrame(
+            {"icao24": ["a"], "time": [0], "lat": [0.0], "lon": [0.0]})
+        return silver, pd.DataFrame(), None
+
+    def fake_worker(args):
+        # args = (silver_path, truth_path, method, noise, source, rows_in, noise_truth)
+        _, _, method, noise, _, _, _ = args
         calls["n"] += 1
         if calls["n"] >= 2:
             raise RuntimeError("simulated crash on cell 2")
-        return {"wall_s": 1.23, "n_flights": 10, "n_deviations": 0,
+        return {"method": method, "noise": noise,
+                "wall_s": 1.23, "n_flights": 10, "n_deviations": 0,
                 "continuity": 0.95, "rows_out": 1000}
 
-    monkeypatch.setattr(rm, "run_experiment", fake_run)
+    monkeypatch.setattr(rm, "prepare_silver", fake_prepare_silver)
+    monkeypatch.setattr(rm, "_worker", fake_worker)
     monkeypatch.setattr(rm, "_load", lambda p: pd.DataFrame(
         {"icao24": ["a"], "time": [0], "lat": [0.0], "lon": [0.0]}))
     monkeypatch.setattr(rm, "MATRIX_CSV", csv_path)
+    # workers=1 forces the in-process sequential path so our monkeypatched
+    # _worker is actually called; the default ProcessPool path re-imports
+    # the module in child processes and would bypass the patch.
     monkeypatch.setattr(_sys, "argv", [
         "run_matrix.py", "--bronze", str(tmp_path),
         "--methods", "time_gap", "kinematic", "--profiles", "N0",
+        "--workers", "1",
     ])
     with pytest.raises(RuntimeError):
         rm.main()
-    assert csv_path.exists(), "matrix.csv missing after crash — crash-safety broken"
+    assert csv_path.exists(), "matrix.csv missing after crash -- crash-safety broken"
     rows = pd.read_csv(csv_path)
     assert len(rows) == 1, f"expected 1 persisted cell, got {len(rows)}"
     assert rows.iloc[0]["method"] == "time_gap"
