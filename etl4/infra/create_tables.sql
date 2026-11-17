@@ -89,3 +89,40 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_ingest_source  ON ingest_runs(source);
 CREATE INDEX IF NOT EXISTS idx_ingest_started ON ingest_runs(started_at DESC);
+
+-- Scale-study results (populated by etl4/bench/scale_study.py). One row per
+-- (method, data_volume_rows) cell. Column order and NULL/DEFAULT choices are
+-- aligned to the defensive CREATE TABLE in scale_study.py so apply-order of
+-- the two statements is immaterial.
+CREATE TABLE IF NOT EXISTS scale_runs (
+  scale_run_id       BIGSERIAL PRIMARY KEY,
+  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  data_volume_rows   BIGINT NOT NULL,
+  source             TEXT NOT NULL,         -- 's3' | 'rest' | 'synthetic'
+  method             TEXT NOT NULL,         -- 'time_gap' | 'kinematic' | 'kinematic_smoothing'
+  noise              TEXT NOT NULL,         -- 'N0'..'N3'
+  wall_secs          DOUBLE PRECISION,
+  rows_per_sec       DOUBLE PRECISION,
+  peak_rss_mb        BIGINT,
+  shuffle_mb         BIGINT,                -- Spark-engine runs only; NULL for pandas
+  engine             TEXT NOT NULL,         -- 'pandas' | 'spark' | 'duckdb'
+  seed               INTEGER NOT NULL DEFAULT 42,
+  notes              TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_method    ON scale_runs(method);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_volume    ON scale_runs(data_volume_rows);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_recorded  ON scale_runs(recorded_at DESC);
+
+-- Pareto frontier for dashboard 08_accuracy_cost. Real-data cells (no
+-- synthetic ground truth) have NULL rmse_m and drop out of the view
+-- naturally; the wall_secs guard prevents a division edge-case in the
+-- efficiency column.
+CREATE OR REPLACE VIEW v_pareto_frontier AS
+SELECT fer.method,
+       fer.noise,
+       fer.rmse_m         AS accuracy_y,
+       fer.wall_secs      AS cost_x,
+       CASE WHEN fer.wall_secs > 0 THEN fer.rmse_m / fer.wall_secs ELSE NULL END AS efficiency
+  FROM fact_experiment_result fer
+ WHERE fer.rmse_m IS NOT NULL
+   AND fer.wall_secs IS NOT NULL;
