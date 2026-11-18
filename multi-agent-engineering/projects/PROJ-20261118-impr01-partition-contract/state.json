@@ -42,6 +42,14 @@
       "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md",
       "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0906-data-engineer-to-orchestrator.json",
       "notes": "Architecture is BINDING. All 18 FRs honoured. Six PO Open Questions answered in architecture.md section 12. Follow-up ADRs listed in architecture.md section 9.3: cross-month flight merge rule, denormalization staleness on fact_trajectory_enriched, SYN-* ym sentinel, fact_experiment_result table-vs-view, WI-1 NFR-05 supersession by DO NOTHING + rewind. Gate mismatch surfaced: WI-1 closed at CONDITIONAL_ACCEPTANCE, not DONE; orchestrator confirmation requested but does not block this phase."
+    },
+    {
+      "gate": "SQL_REVIEW_T17_T18",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T17:30:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t19_sql_review.md",
+      "notes": "T-19 SQL review of PR4 (T-17 postgres_sink.py staged UPSERT + T-18 sink/postgres.py write_run CTE). Sections A-E all PASS: TEMP lifetime + ON COMMIT DROP, DISTINCT ON tiebreakers byte-match architecture section 4.2/4.3, same-txn watermark through watermark.set(..., conn), CTE returns exactly one (run_id, created) row on both insert + conflict paths, transactional boundaries correct for both modules. No SQL defects. UNIQUE (ym, source, method, noise) from T-01B rules out multi-row conflict ambiguity. Unblocks T-20, T-22, T-27."
     }
   ],
   "open_defects": [],
