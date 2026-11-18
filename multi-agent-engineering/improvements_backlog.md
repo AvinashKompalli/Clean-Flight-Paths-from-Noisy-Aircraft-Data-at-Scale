@@ -2,12 +2,30 @@
 
 Ranked, scoped follow-ups for after PROJ-20261114-wi1-metrics closes. Each
 item has an explicit PDF/plan.md trace, a scope boundary, an effort estimate,
-and a prerequisite list. None of these are in flight; the orchestrator will
-only dispatch a specialist against one when the user runs `/workflow` with
-its slug.
+and a prerequisite list.
 
 Rank order reflects impact against the PDF's §3 Performance Metrics for
 Success and §2 High-Level Design, weighted by effort.
+
+---
+
+## Evaluation verdict (orchestrator, 2026-11-18)
+
+User directive: "look into and implement the 3 suggestions if needed."
+
+| Item | Verdict | Rationale | Queued dispatch |
+|---|---|---|---|
+| **IMPR-01** partition contract | **IMPLEMENT** | PDF §3 "scaling efficiency" cannot be credibly reported without this. Removes the proximate cause of the 10 GB ENOSPC and the 20-30 min full-vault rebuild on any new month. Design is already committed as ADR 2026-11-13 - pure execution ahead. | `/workflow IMPR-01` fires the moment PROJ-20261114-wi1-metrics reaches `phase: DONE`. |
+| **IMPR-02** Spark flightlist vault | **IMPLEMENT** | PDF §2 literally names Spark at the top of the architecture diagram; only `sat_state_observation` currently uses it. Without this, the scaling curve on dashboard 08 is pandas-sized and the "we scale by adding executors" story is unsupported. | `/workflow IMPR-02` fires after IMPR-01 (shares vault files; sequencing avoids merge churn). |
+| **IMPR-03** Iceberg/Delta migration | **DEFER (not needed)** | Not in the PDF scope. Buys lakehouse maturity (ACID, time travel, hidden partitioning, schema evolution) but delivers no PDF-grading evidence. Course scope-creep risk outweighs the engineering lift. Keep on this list as an aspirational extension if the team later wants to argue "beyond the brief"; do NOT auto-dispatch. | Do not auto-dispatch. Only on explicit user signoff. |
+
+Both IMPR-01 and IMPR-02 have a hard prerequisite on WI-1 acceptance (the
+backlog items say so, and dispatching them earlier would clash with the
+in-flight T-008 e2e + data-engineer review). The orchestrator will wire the
+auto-chain from WI-1 final acceptance -> IMPR-01 kickoff on the final-accept
+hand-back; and IMPR-01 acceptance -> IMPR-02 kickoff on IMPR-01's.
+
+---
 
 ---
 
@@ -147,8 +165,76 @@ Success and §2 High-Level Design, weighted by effort.
 
 The orchestrator creates a fresh project under `multi-agent-engineering/projects/`, routes through product-owner (requirements) + data-engineer (architecture) + developers + testers in the usual DAG.
 
+---
+
+## Follow-ups raised by data-engineer CORE_SOLUTION_REVIEW (2026-11-18)
+
+Six medium/low-severity items surfaced during the independent technical
+review of PROJ-20261114-wi1-metrics. None blocked acceptance (DE recommended
+APPROVE). Tracked here so WI-2 and the IMPR-01/02 waves can fold them in
+cleanly.
+
+### IMPR-04 - persist deviation_prf1 to Postgres
+**Severity: medium.** `etl4/evaluate/metrics.py` emits `dev_precision`,
+`dev_recall`, `dev_f1` into the `rec` dict, but
+`etl4/sink/postgres.py::_PERSISTED_METRICS` does not list them, so they are
+dropped before Postgres. Three-line fix. Natural landing spot: WI-2 Phase A
+(deviation detection pipeline) where the metrics are the headline. Effort: 15 min.
+
+### IMPR-05 - jump-aware init for Kalman smoothing at N2/N3
+**Severity: medium.** `kinematic_smoothing` under N2/N3 noise produces
+rmse_m in the 1.3M-1.95M range because CHI2_GATE rejects 2-degree position
+jumps as 4-sigma outliers on the clean-fixture line. Pareto narrative holds
+("Kalman degrades under heavy ADS-B noise without jump-aware init") but the
+numeric result is embarrassing on the dashboard. Fix: skip gate during
+first K samples after a flagged jump, or seed Kalman with a robust init.
+Existing related ADR: 2026-11-09. Effort: 1-2 days.
+
+### IMPR-06 - clamp coverage_ratio at 1.0 (or investigate correct_trajectory duplication)
+**Severity: medium.** `coverage_ratio > 1.0` on `kinematic_smoothing` under
+N2/N3 (1.451, 1.867) because Kalman reconstruction appears to produce
+duplicate rows mid-flight. Either tighten the clamp in `metrics.py` or
+dedupe inside `reconstruct/kalman.py`. The dashboard panel renders correctly
+but the number reads as a bug. Effort: half a day.
+
+### IMPR-07 - vectorise `_mask_from_events`
+**Severity: low.** `etl4/evaluate/metrics.py::_mask_from_events` is an
+O(events*rows) Python loop. Fine at the WI-1 synthetic fixture scale; will
+hurt under N3 at real bronze volumes once IMPR-01 lets the matrix run on
+per-month partitions. Vectorise with pandas or numpy when IMPR-01 lands.
+Effort: 2-3 hours.
+
+### IMPR-08 - remove double-noising from synthetic main()
+**Severity: medium (pre-existing).** `etl4/ingest/synthetic.py::main()`
+calls `add_noise()` before bronze write, which then becomes input to
+`inject_noise()` in the matrix path. The matrix therefore applies noise
+twice. Pareto ordering survives this (relative method ranking preserved)
+so WI-1 acceptance is not blocked, but downstream absolute numbers are
+biased. Fix: drop `add_noise()` from `main()`; `inject_noise()` is the
+single source of controlled noise. Effort: 30 min.
+
+### IMPR-09 - stable runs.csv header
+**Severity: low.** `data/eval/runs.csv` widened from 14 to 18 columns when
+T-003 added the four new metric columns. Pre-existing runs.csv files cause
+a pandas `ParserError` on the next matrix run ("Expected 14 fields in
+line 34, saw 18"). File is gitignored, dev-local, and only affects a
+developer's second local run. Fix: version the header, or wipe-and-regen
+on schema mismatch. Effort: 15 min.
+
+### IMPR-10 - ADR for the eval_mart schema expansion
+**Severity: low (process hygiene).** 2026-11-18 orchestrator fix to
+`stage_eval_mart` grew `fact_experiment_result` from 14 columns to 18
+(added `seg_precision`, `seg_recall`, `coverage_ratio`, `boundary_err_s`),
+remapped the metric key from `rmse_m` to `position_rmse_m`, dropped the
+`source='s3'` filter, and introduced `DROP VIEW ... BEFORE DROP TABLE`
+because `v_pareto_frontier` depends on `fact_experiment_result`. These are
+real, load-bearing decisions that should be documented in
+`etl4/docs/decisions.md` for the audit trail. Effort: 20 min.
+
+---
+
 ## Not on this list (and why)
 
 - Anomaly-detection streaming promotion (WI-2 Phase B from the earlier discussion): already named, scoped and user-confirmed; lives separately as its own project kickoff after WI-1, not an improvement.
-- Deviation-detection dashboard (WI-2 Phase A): same - that is the next in-flight project, not an improvement.
-- Fixing the `test_matrix_csv_written_after_every_cell` pre-existing failure: tiny, surgical, noise - do it as a one-shot `/workflow` without going through the improvements backlog.
+- Deviation-detection dashboard (WI-2 Phase A): same - that is the next in-flight project, not an improvement. IMPR-04 naturally merges into Phase A.
+- Fixing the `test_matrix_csv_written_after_every_cell` pre-existing failure: ALREADY FIXED as part of the WI-1 wave-3 commit.
