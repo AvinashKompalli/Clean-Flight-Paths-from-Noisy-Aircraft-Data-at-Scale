@@ -3,17 +3,50 @@
   "title": "IMPR-01: Implement the ym=YYYY-MM partition contract with watermark-driven incremental refresh",
   "description": "Execute the ADR 2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh. Design is committed; this project is the implementation wave. Removes the 20-30 min full vault rebuild on any new month input and replaces TRUNCATE+COPY sink with INSERT ON CONFLICT. Prerequisite: PROJ-20261114-wi1-metrics reaches phase=DONE.",
   "created_at_utc": "2026-11-18T05:08:00Z",
-  "updated_at_utc": "2026-11-18T05:08:00Z",
-  "phase": "PENDING_WI1_ACCEPTANCE",
-  "tasks": [],
+  "updated_at_utc": "2026-11-18T09:06:00Z",
+  "phase": "ARCHITECTURE",
+  "tasks": [
+    {
+      "task_id": "T-001",
+      "name": "Requirements + BRD + AC + RTM",
+      "owner": "product-owner",
+      "status": "APPROVED",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md"
+    },
+    {
+      "task_id": "T-ARCH",
+      "name": "Architecture (DDL, SQL, task breakdown, 5-PR plan, migration outline, risks)",
+      "owner": "data-engineer",
+      "status": "APPROVED",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md"
+    }
+  ],
   "artifacts": {
     "requirements": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
     "architecture": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md"
   },
-  "approval_history": [],
+  "approval_history": [
+    {
+      "gate": "REQUIREMENTS",
+      "approver": "product-owner",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T06:12:00Z",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+      "notes": "18 FRs, 17 NFRs, 18 ACs, 100% RTM coverage. 6 open questions for data-engineer. State.json upstream_design wording 'view or materialized view' corrected to 'plain SQL view' per ADR 2026-11-13 + 2026-11-18."
+    },
+    {
+      "gate": "ARCHITECTURE",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T09:06:00Z",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0906-data-engineer-to-orchestrator.json",
+      "notes": "Architecture is BINDING. All 18 FRs honoured. Six PO Open Questions answered in architecture.md section 12. Follow-up ADRs listed in architecture.md section 9.3: cross-month flight merge rule, denormalization staleness on fact_trajectory_enriched, SYN-* ym sentinel, fact_experiment_result table-vs-view, WI-1 NFR-05 supersession by DO NOTHING + rewind. Gate mismatch surfaced: WI-1 closed at CONDITIONAL_ACCEPTANCE, not DONE; orchestrator confirmation requested but does not block this phase."
+    }
+  ],
   "open_defects": [],
   "change_requests": [],
-  "last_handoff": null,
+  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0906-data-engineer-to-orchestrator.json",
   "source_request": "User directive 2026-11-18: 'make the 3 suggestions I gave are also looked into and implemented if needed'. Orchestrator evaluation: IMPR-01 marked IMPLEMENT (strong PDF section 3 trace, design already committed as ADR, pure execution ahead). Full rationale in multi-agent-engineering/improvements_backlog.md IMPR-01 entry. Gate: PROJ-20261114-wi1-metrics must reach phase=DONE before this project advances past PENDING.",
   "standing_rules": [
     "CLAUDE.md at repo root is non-negotiable",
@@ -35,18 +68,18 @@
       "Marts: per-month build, append to partitioned tree",
       "Sink: INSERT ... ON CONFLICT per target per month (replaces TRUNCATE + COPY)",
       "Matrix: add ym column + unique (ym, source, method, noise), ON CONFLICT DO NOTHING",
-      "eval_mart: become a view or incremental materialized view",
+      "eval_mart: plain SQL view (not materialized)",
       "Rewind CLI: python -m etl4.orchestration.rewind --layer vault --from 2022-03 --to 2022-05",
       "Zero-reprocess migration: one-shot pyarrow pass per existing monolithic part.parquet split by extracted ym"
     ],
     "effort_estimate_days": "3-4",
     "sub_pr_count_target": 5,
     "risks_from_adr": [
-      "Cross-month flights (same hk_flight in two ym partitions) - reader-side merge rule, already specified",
+      "Cross-month flights (same hk_flight in two ym partitions) - reader-side merge rule in vault/marts.py::_latest_sfs()",
       "Small-hub uniqueness drift - compaction pass enforces",
       "ym extraction asymmetry: flightlist bronze has in-file day; state bronze has it in the partition path",
-      "Watermark vs filesystem drift - startup QA check in run_e2e refuses to start if they disagree"
+      "Watermark vs filesystem drift - set(ym dirs) vs contiguous [min, last_ym] range check in run_e2e"
     ]
   },
-  "dispatch_chain_note": "On PROJ-20261114-wi1-metrics phase=DONE, orchestrator will: (1) set this project's phase to REQUIREMENTS, (2) dispatch product-owner with the pre-staged prompt at the scratchpad path above, (3) run the usual DAG. This project uses the same specialists and same runtime gates as WI-1."
+  "dispatch_chain_note": "Orchestrator next step: dispatch developer-backend on PR1 (DDL + skeleton) and PR4 (sink UPSERT staging pattern) in parallel. Data-engineer standing by for T-04 spec, T-07 reader-conversion checklist, and all code reviews. See architecture.md section 5 for the 27-task breakdown and section 8 for the workstream map."
 }
