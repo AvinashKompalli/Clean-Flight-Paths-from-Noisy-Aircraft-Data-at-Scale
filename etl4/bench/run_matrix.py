@@ -43,9 +43,31 @@ ROOT = Path(__file__).resolve().parents[2]
 SILVER_DIR = ROOT / "data" / "silver" / "cleaned_states"
 GOLD_DIR   = ROOT / "data" / "gold"   / "marts" / "reconstructions"
 MATRIX_CSV = ROOT / "data" / "eval"   / "matrix.csv"
+SYNTHETIC_TRUTH_DIR = ROOT / "etl4" / "data" / "reference" / "synthetic_truth"
 
 METHODS = ["time_gap", "kinematic", "kinematic_smoothing"]
 NOISE_PROFILES = ["N0", "N1", "N2", "N3"]
+
+
+def _derive_synthetic_truth(bronze_path: Path) -> Path | None:
+    """Infer the synthetic truth parquet from the bronze tree.
+
+    Bronze layout is `<root>/date=YYYY-MM-DD/hour=H/part*.parquet`; the
+    matching truth lives at `etl4/data/reference/synthetic_truth/<date>.parquet`.
+    Returns None when the date token is absent or ambiguous so callers can
+    fall back to the original --truth=None path.
+    """
+    dates: set[str] = set()
+    for part in bronze_path.parts:
+        if part.startswith("date="):
+            dates.add(part[len("date="):])
+    if not dates and bronze_path.is_dir():
+        for child in bronze_path.iterdir():
+            if child.is_dir() and child.name.startswith("date="):
+                dates.add(child.name[len("date="):])
+    if len(dates) != 1:
+        return None
+    return SYNTHETIC_TRUTH_DIR / f"{dates.pop()}.parquet"
 
 
 def _load(path: Path) -> pd.DataFrame:
@@ -83,6 +105,19 @@ def main():
     p.add_argument("--workers",  type=int, default=4,
                    help="parallel workers for pass 2 reconstruction")
     a = p.parse_args()
+
+    if a.truth is None and a.source == "synthetic":
+        derived = _derive_synthetic_truth(Path(a.bronze))
+        if derived is None:
+            print("WARNING: could not auto-derive --truth from --bronze "
+                  "(no unique date= token); PDF metrics on synthetic cells "
+                  "will be NaN", flush=True)
+        elif derived.exists():
+            a.truth = str(derived)
+            print(f"auto-derived --truth from --bronze: {derived}", flush=True)
+        else:
+            print(f"WARNING: auto-derived --truth path missing: {derived}; "
+                  "proceeding without truth frame", flush=True)
 
     bronze = _load(Path(a.bronze))
     rows_in = int(len(bronze))
