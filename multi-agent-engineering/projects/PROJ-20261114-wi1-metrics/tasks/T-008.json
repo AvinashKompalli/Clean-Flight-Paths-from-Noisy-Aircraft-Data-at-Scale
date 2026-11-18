@@ -1,0 +1,54 @@
+{
+  "task_id": "T-008",
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "phase": "FUNCTIONAL_TEST",
+  "owner": "functional-tester",
+  "title": "Independent e2e validation of WI-1 against 16 ACs",
+  "description": "Fresh dispatch after prior session hit a rate limit. Executed the full test battery A-G, documented panel-by-panel dashboard SQL smoke, filed three defects, emitted FAILED verdict blocking product-owner acceptance pending fix of DEF-001.",
+  "inputs": [
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/architecture.md",
+    "postgresql://etl4:change_me@localhost:5432/etl4",
+    "http://localhost:3000"
+  ],
+  "deliverables": [
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/test_report.md",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/handoffs/20261118T0420-functional-tester-to-orchestrator.json",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/tasks/T-008.json"
+  ],
+  "commands_run": [
+    {"cmd": "python etl4/bench/run_matrix.py --bronze data/bronze/synthetic --source synthetic --profiles N0 N1 N2 N3 --methods time_gap kinematic kinematic_smoothing --workers 1", "exit": 0, "wall_s": 10.805, "notes": "Orchestrator-supplied command omitted --bronze; CLI requires it. Corrected and re-ran."},
+    {"cmd": "python -c \"from etl4.run_e2e import stage_eval_mart; stage_eval_mart()\"", "exit": 0, "wall_s": 0.5, "notes": "25-row pivot persisted; 12 synthetic cells carry NULL across six PDF metrics (see DEF-001)"},
+    {"cmd": "python -m etl4.bench.scale_study --volumes 10000,100000,1000000 --methods time_gap,kinematic,kinematic_smoothing --bronze data/bronze/raw_states", "exit": 0, "wall_s": 115.8, "notes": "Orchestrator form was space-separated for --methods which the parser rejects. Comma-separated form accepted."},
+    {"cmd": "pytest etl4/tests/ -q", "exit": 0, "result": "33 passed, 1 skipped in 5.64s"},
+    {"cmd": "python -m etl4.qa.reconcile --tolerance 0.02", "exit": 1, "result": "2 ok, 1 fail (pre-existing flightlists 20.7% drop)"},
+    {"cmd": "curl -s -u admin:admin http://localhost:3000/api/dashboards/uid/etl4-accuracy-cost", "exit": 0, "result": "9 panels; uid etl4-accuracy-cost; folder ETL4"},
+    {"cmd": "curl -s -u admin:admin http://localhost:3000/api/dashboards/uid/<each of 7 dashboards>", "exit": 0, "result": "all 200; panels: accuracy-cost=9 analyst-view=13 pipeline-results=8 de-pipeline=13 flight-paths=7 ingest-comparison=6 ingest-throughput=4"}
+  ],
+  "ac_coverage": {
+    "AC-01": {"status": "PASS", "evidence": "pytest test_noise_truth suite 9 active tests pass"},
+    "AC-02": {"status": "PASS_LIVE_BUT_TEST_SKIPPED", "evidence": "REPL confirms generate_synthetic emits monotonic unique __truth_id; test_synthetic_truth_id_is_monotonic_unique_int64 still skips because skipif probe uses make_flight not generate_synthetic - see DEF-002"},
+    "AC-03": {"status": "PASS", "evidence": "pytest segmentation_prf1 tests"},
+    "AC-04": {"status": "PASS", "evidence": "pytest boundary_time_error tests"},
+    "AC-05": {"status": "PASS", "evidence": "pytest position_rmse_m tests"},
+    "AC-06": {"status": "PASS", "evidence": "pytest coverage_ratio tests"},
+    "AC-07": {"status": "PASS", "evidence": "pytest cross_track_from_reference tests"},
+    "AC-08": {"status": "PASS", "evidence": "pytest deviation_prf1 tests"},
+    "AC-09": {"status": "INDETERMINATE", "evidence": "Not exercised in this battery; AC-10 live-run proxy fails, implying AC-09 would also fail on bronze without __truth_id"},
+    "AC-10": {"status": "FAIL", "evidence": "12 synthetic cells have all 6 metrics NULL in fact_experiment_result; DEF-001 critical"},
+    "AC-11": {"status": "FAIL", "evidence": "v_pareto_frontier count = 0, expected 12; follows from AC-10 fail"},
+    "AC-12": {"status": "PASS", "evidence": "uid etl4-accuracy-cost returns 200; panel_count=9 >= 5"},
+    "AC-13": {"status": "PASS", "evidence": "psql \\d scale_runs shows all 8 spec columns plus 5 architecture-extended columns"},
+    "AC-14": {"status": "PARTIAL", "evidence": "9 fresh rows (3 methods x 3 volumes); 10M/50M excluded by orchestrator instruction so idempotent-on-re-run plus 12-row target not exercised end-to-end"},
+    "AC-15": {"status": "PARTIAL", "evidence": "scale curves populate; Pareto scatter empty because of AC-10/11 fail; heatmap populates via continuity fallback; skip-and-log table correctly empty"},
+    "AC-16": {"status": "PASS_WITH_NOTE", "evidence": "pytest 33 passed 0 failed; 1 skipped (DEF-002) - letter satisfied, spirit partially"}
+  },
+  "defects": [
+    {"id": "DEF-001", "severity": "critical", "title": "fact_experiment_result six PDF metrics NULL across all 12 synthetic cells; v_pareto_frontier collapses to 0 rows", "owner": "data-engineer"},
+    {"id": "DEF-002", "severity": "medium", "title": "T-002 __truth_id round-trip test skipif probe targets wrong function (make_flight) so AC-02 remains uncovered in CI", "owner": "unit-tester"},
+    {"id": "DEF-003", "severity": "low", "title": "Reconcile bronze_flightlists -> vault.hub_flight 20.7% drop (pre-existing, out of WI-1 scope)", "owner": "data-engineer"}
+  ],
+  "status": "FAILED",
+  "started_at_utc": "2026-11-18T04:12:00Z",
+  "completed_at_utc": "2026-11-18T04:20:00Z"
+}

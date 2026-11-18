@@ -174,19 +174,33 @@ def reconstruct_from_silver(silver: pd.DataFrame, method: str, noise: str, sourc
     # Ground-truth-dependent metrics only on the synthetic path. Real
     # sources have no __truth_id, so we leave the keys unset and the
     # sink + CSV writers render them as NULL / nan.
-    if source == "synthetic" and truth is not None and not truth.empty:
+    # Enter whenever EITHER a truth DataFrame with __truth_id is supplied
+    # OR an in-memory NoiseTruth sidecar carries original_ids. The four
+    # sidecar-only scorers (coverage_ratio, segmentation_prf1,
+    # boundary_time_error_s, deviation_prf1) populate from NoiseTruth
+    # alone; position_rmse_m still needs the truth DataFrame because the
+    # NoiseTruth.original_coords field only captures pre-jump coords for
+    # the jumped_ids subset, not every surviving id.
+    has_truth_df = (
+        truth is not None and not truth.empty and TRUTH_ID in truth.columns
+    )
+    has_sidecar = (
+        noise_truth is not None and bool(noise_truth.original_ids)
+    )
+    if source == "synthetic" and (has_truth_df or has_sidecar):
         # from_proxy flags cells where NoiseTruth was reconstructed from
         # truth + silver (matrix path without an in-memory sidecar, or
         # N0 which skips inject_noise). Such a proxy has jumped_ids=empty
         # so scoring deviation_prf1 would emit a fabricated zero; skip
         # the metric in that case rather than persist noise.
         from_proxy = noise_truth is None
-        if from_proxy:
+        if from_proxy and has_truth_df:
             noise_truth = _synthesise_noise_truth(truth, df, noise)
         if noise_truth is not None:
-            rmse = position_rmse_m(df, noise_truth, truth)
-            if rmse is not None and not (isinstance(rmse, float) and np.isnan(rmse)):
-                metrics["position_rmse_m"] = float(rmse)
+            if has_truth_df:
+                rmse = position_rmse_m(df, noise_truth, truth)
+                if rmse is not None and not (isinstance(rmse, float) and np.isnan(rmse)):
+                    metrics["position_rmse_m"] = float(rmse)
             metrics["coverage_ratio"] = float(coverage_ratio(df, noise_truth))
             pred_b = _flight_boundaries(df)
             true_b = noise_truth.true_boundaries

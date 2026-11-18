@@ -221,6 +221,9 @@ line 34, saw 18"). File is gitignored, dev-local, and only affects a
 developer's second local run. Fix: version the header, or wipe-and-regen
 on schema mismatch. Effort: 15 min.
 
+### IMPR-11 - `run_matrix.py` auto-derive `--truth` from bronze for synthetic source
+**Severity: medium (dev-UX, surfaces as CRITICAL if forgotten).** DEF-001 required the developer to pass `--truth etl4/data/reference/synthetic_truth/2026-01-01.parquet` explicitly to the matrix CLI for N0 cells to score (inject_noise is skipped at N0 so no sidecar is produced). Without that flag, the metric block falls through and all 6 PDF-mandated metrics write NULL. `run_experiment.py:223` already has bronze-derived truth fallback logic - mirror the same into `run_matrix.py` so the CLI default is "just works". Effort: 1 hour. Owner: data-engineer or developer-backend. File: `etl4/bench/run_matrix.py`.
+
 ### IMPR-10 - ADR for the eval_mart schema expansion
 **Severity: low (process hygiene).** 2026-11-18 orchestrator fix to
 `stage_eval_mart` grew `fact_experiment_result` from 14 columns to 18

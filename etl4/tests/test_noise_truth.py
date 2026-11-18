@@ -204,16 +204,15 @@ def test_n1_profile_counts_are_well_formed():
 # --- 10. __truth_id round-trip (skipped until T-002 lands) ----------------
 
 def _synthetic_emits_truth_id() -> bool:
-    """Probe whether etl4.ingest.synthetic.make_flight already emits the
-    __truth_id column (T-002 deliverable). Returns False if synthetic.py
+    """Probe whether etl4.ingest.synthetic.generate_synthetic already emits
+    the __truth_id column (T-002 deliverable). Returns False if synthetic.py
     is importable but the column is absent, True if present."""
     try:
-        from etl4.ingest.synthetic import make_flight
+        from etl4.ingest.synthetic import generate_synthetic
     except Exception:
         return False
     try:
-        rng = np.random.default_rng(42)
-        df = make_flight(rng, "abc123", 1_000_000, 5, 10)
+        df = generate_synthetic(10, seed=42)
         return TRUTH_ID in df.columns
     except Exception:
         return False
@@ -221,15 +220,14 @@ def _synthetic_emits_truth_id() -> bool:
 
 @pytest.mark.skipif(
     not _synthetic_emits_truth_id(),
-    reason="T-002 not landed: synthetic.make_flight does not emit __truth_id yet",
+    reason="T-002 not landed: synthetic.generate_synthetic does not emit __truth_id yet",
 )
 def test_synthetic_truth_id_is_monotonic_unique_int64():
     """When T-002 has landed, synthetic generation must emit __truth_id as a
     monotonic, unique int64 column. Auto-unskips once T-002 completes."""
-    from etl4.ingest.synthetic import make_flight
+    from etl4.ingest.synthetic import generate_synthetic
 
-    rng = np.random.default_rng(42)
-    df = make_flight(rng, "abc123", 1_000_000, 50, 10)
+    df = generate_synthetic(500, seed=42)
     assert TRUTH_ID in df.columns
     assert df[TRUTH_ID].dtype == np.int64
     assert df[TRUTH_ID].is_monotonic_increasing
