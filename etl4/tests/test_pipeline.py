@@ -246,6 +246,10 @@ def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
     monkeypatch.setattr(rm, "_load", lambda p: pd.DataFrame(
         {"icao24": ["a"], "time": [0], "lat": [0.0], "lon": [0.0]}))
     monkeypatch.setattr(rm, "MATRIX_CSV", csv_path)
+    # Sink is orthogonal to this test's invariant (matrix.csv crash-safety);
+    # IMPR-01 propagates schema errors from write_run instead of swallowing
+    # them, so stub the sink to keep the test independent of Postgres state.
+    monkeypatch.setattr(rm, "write_run", lambda *a, **kw: None)
     # workers=1 forces the in-process sequential path so our monkeypatched
     # _worker is actually called; the default ProcessPool path re-imports
     # the module in child processes and would bypass the patch.
