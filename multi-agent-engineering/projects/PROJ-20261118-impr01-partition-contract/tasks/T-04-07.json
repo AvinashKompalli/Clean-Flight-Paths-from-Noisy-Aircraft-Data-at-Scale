@@ -1,0 +1,99 @@
+{
+  "task_id": "T-04-07",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR2 (spec input; implementation under T-05 and reader-migration PRs)",
+  "title": "vault_io.py spec (T-04) + reader-conversion checklist (T-07)",
+  "owner": "data-engineer",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "blocker",
+  "objective": "Produce (a) the binding API + behaviour spec for etl4/vault/vault_io.py so developer-backend can implement under T-05, and (b) the authoritative list of pd.read_parquet / rglob / ParquetFile call sites that must migrate to vault_io.",
+  "depends_on": [],
+  "unblocks": [
+    "T-05 (developer-backend implements vault_io.py from vault_io_spec.md)",
+    "T-06 (unit-tester invariants rely on the spec's acceptance criteria)",
+    "T-08/T-09/T-10 (raw_vault.py rewrite - writer side uses vault_io.write_partition)",
+    "T-14 (marts.py rewrite - 9 reader sites + 4 writer sites per checklist)",
+    "T-17 (postgres_sink.py staged INSERT ON CONFLICT - 1 reader site)",
+    "T-22 (run_e2e pre-flight drift check - uses vault_io.list_ym)",
+    "T-24a (NEW - pipeline_volumes.py migration; surfaced as surprise call site)"
+  ],
+  "files_changed": [
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/vault_io_spec.md",
+      "change": "new",
+      "sections": 9,
+      "public_api_methods": 9,
+      "public_api_symbols": ["read_table", "write_partition", "row_count", "list_ym", "ym_from_filename", "ym_from_date", "ym_from_epoch", "extract_ym_from_frame", "extract_ym_from_path", "SILVER_VAULT_ROOT", "MARTS_ROOT", "PARTITIONED_TABLES", "NON_PARTITIONED_TABLES"]
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/reader_conversion_checklist.md",
+      "change": "new",
+      "files_covered": 8,
+      "in_scope_call_sites": 20,
+      "out_of_scope_call_sites_flagged": 11,
+      "surprise_sites": 1
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "statement": "vault_io_spec.md defines full signatures (not just type hints) for read_table, write_partition, row_count, list_ym, ym_from_filename, ym_from_date, ym_from_epoch, extract_ym_from_frame, extract_ym_from_path.",
+      "status": "PASS"
+    },
+    {
+      "id": "AC-2",
+      "statement": "Reader fallback contract is specified for all four cases (monolith-only, partitioned-only, mixed, empty).",
+      "status": "PASS"
+    },
+    {
+      "id": "AC-3",
+      "statement": "Partition layout reference quotes architecture.md §2.4 verbatim; ym truth table matches §2.5.",
+      "status": "PASS"
+    },
+    {
+      "id": "AC-4",
+      "statement": "Non-goals section covers dedup, watermark table I/O, Postgres, bronze, GE suites, sort order.",
+      "status": "PASS"
+    },
+    {
+      "id": "AC-5",
+      "statement": "reader_conversion_checklist.md lists every in-scope call site with file path, line numbers, current call, target call, and notes - grep-verified against feature/pipeline-3-avinash HEAD.",
+      "status": "PASS"
+    },
+    {
+      "id": "AC-6",
+      "statement": "Checklist flags surprise call sites not in architecture.md section 5 (pipeline_volumes.py).",
+      "status": "PASS"
+    }
+  ],
+  "grep_evidence": {
+    "command": "rg -nE \"read_parquet|rglob\\(.\\*\\\\.parquet.\\)|ParquetFile\\(\" etl4/vault/marts.py etl4/vault/raw_vault.py etl4/vault/postgres_sink.py etl4/qa/reconcile.py etl4/qa/validate.py etl4/bench/run_matrix.py etl4/run_e2e.py etl4/orchestration/pipeline_volumes.py etl4/orchestration/ingest_runner.py",
+    "run_at": "2026-11-18T09:19Z",
+    "head_sha": "80e63e7",
+    "in_scope_hits": {
+      "etl4/vault/marts.py": [30, 36],
+      "etl4/vault/raw_vault.py": [49, 277, 396],
+      "etl4/vault/postgres_sink.py": [71],
+      "etl4/qa/reconcile.py": [48, 49],
+      "etl4/qa/validate.py": [45, 48],
+      "etl4/run_e2e.py": [],
+      "etl4/orchestration/pipeline_volumes.py": [75, 76]
+    },
+    "out_of_scope_hits": {
+      "etl4/bench/run_matrix.py": [75, 77, 87, 88],
+      "etl4/bench/run_experiment.py": [286, 287],
+      "etl4/bench/scale_study.py": [102, 105],
+      "etl4/orchestration/ingest_runner.py": [34, 43, 44],
+      "etl4/ingest/replay_producer.py": [36, 38, 39],
+      "etl4/run_pipeline.py": [34, 35, 38],
+      "etl4/vault/bronze_flightlists.py": [57, 62],
+      "etl4/tests/test_pipeline.py": [34],
+      "etl4/tests/test_smoke.py": [19],
+      "etl4/tests/inspect_bronze.py": [10, 16],
+      "etl4/tests/smoke_kafka.py": [22, 24],
+      "etl4/vault/raw_vault.py_bronze_side": [42, 43, 46, 230, 348, 454, 458, 479, 483]
+    }
+  },
+  "handoff_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0919-data-engineer-to-orchestrator.json"
+}
