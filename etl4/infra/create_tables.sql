@@ -147,3 +147,59 @@ CREATE TABLE IF NOT EXISTS pipeline_watermarks (
     CHECK (last_ym ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')
 );
 CREATE INDEX IF NOT EXISTS idx_watermarks_layer ON pipeline_watermarks(layer);
+
+-- IMPR-01 T-01B: pipeline_runs.ym (ADD COLUMN + backfill + NOT NULL + UNIQUE)
+-- Synthetic cells get the SYN-<seed_hex> sentinel (per architecture section 2.3)
+-- because they have no natural calendar month. Real sources get the
+-- run_date's YYYY-MM.
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS ym TEXT;
+
+-- Backfill: idempotent. SYN sentinel for synthetic (seed_hex derived
+-- from the matrix seed=42 -> 'SYN-002A'); YYYY-MM from run_date / started_at
+-- otherwise.
+UPDATE pipeline_runs
+   SET ym = CASE
+       WHEN source = 'synthetic' THEN 'SYN-002A'
+       WHEN started_at IS NOT NULL
+            THEN to_char(started_at, 'YYYY-MM')
+       WHEN run_date IS NOT NULL
+            THEN to_char(run_date, 'YYYY-MM')
+       ELSE 'UNKNOWN'
+       END
+ WHERE ym IS NULL;
+
+-- Duplicate collapse: if existing rows have the same (ym, source, method, noise)
+-- after backfill, keep the one with the highest run_id (newest). This HAS to
+-- happen before the UNIQUE constraint; otherwise it will fail.
+WITH ranked AS (
+  SELECT run_id,
+         ROW_NUMBER() OVER (
+             PARTITION BY ym, source, method, noise
+             ORDER BY run_id DESC
+         ) AS rn
+    FROM pipeline_runs
+   WHERE ym IS NOT NULL
+)
+DELETE FROM pipeline_runs
+ WHERE run_id IN (SELECT run_id FROM ranked WHERE rn > 1);
+
+-- Lock in: no future row may skip ym
+ALTER TABLE pipeline_runs ALTER COLUMN ym SET NOT NULL;
+
+-- Unique composite so PR4's INSERT ... ON CONFLICT (ym, source, method, noise)
+-- DO NOTHING can function. Idempotent via the IF NOT EXISTS pattern on the
+-- constraint name - PG does not support IF NOT EXISTS on ADD CONSTRAINT, so
+-- wrap in DO block.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'pipeline_runs_ym_src_mth_noise_key'
+    ) THEN
+        ALTER TABLE pipeline_runs
+            ADD CONSTRAINT pipeline_runs_ym_src_mth_noise_key
+            UNIQUE (ym, source, method, noise);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_ym ON pipeline_runs(ym);
