@@ -1,0 +1,66 @@
+{
+  "from": "developer-backend",
+  "to": "orchestrator",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-05",
+  "pr": "PR2",
+  "timestamp_utc": "2026-11-18T15:30:00Z",
+  "status": "APPROVED",
+  "summary": "etl4/vault/vault_io.py (339 lines) implements all 9 public API methods from vault_io_spec.md section 2 -- read_table, write_partition, row_count, list_ym, ym_from_filename, ym_from_date, ym_from_epoch, extract_ym_from_frame, extract_ym_from_path -- plus the 4 module-level constants (SILVER_VAULT_ROOT, MARTS_ROOT, PARTITIONED_TABLES, NON_PARTITIONED_TABLES). All 4 reader-fallback cases work (empty / monolith-only / partitioned-only / mixed-wins), icao24 stays pandas 'string' dtype, pyarrow column pushdown is wired, and the Spark-shard reader extension (globs '<ym_dir>/*.parquet') lets raw_vault_spark.py's partitioned writes load transparently. write_partition is atomic via .part.parquet.<pid>.tmp + os.replace and deterministic (SHA256 identical on repeat writes).",
+  "files_changed": [
+    {"path": "etl4/vault/vault_io.py", "change": "new", "lines_added": 339, "lines_removed": 0},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t05_vault_io_smoke.py", "change": "new", "lines_added": 342, "lines_removed": 0},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-05.json", "change": "new", "lines_added": 50, "lines_removed": 0},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T1530-developer-backend-to-orchestrator.json", "change": "new", "lines_added": 1, "lines_removed": 0}
+  ],
+  "integration_points": {
+    "reads": "<root>/<name>/part.parquet (monolith fallback) and <root>/<name>/ym=YYYY-MM/*.parquet (partitioned); pyarrow footer only for row_count (O(files))",
+    "writes": "<out_dir>/<name>/ym=<ym>/part.parquet atomically; validates ym against YYYY-MM or SYN-<hex>",
+    "contract_matches_spec_verbatim": true
+  },
+  "commands_run": [
+    {"cmd": "python -c \"import ast; ast.parse(open('etl4/vault/vault_io.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+    {"cmd": "python -c \"from etl4.vault.vault_io import read_table, write_partition, row_count, list_ym, ym_from_filename, ym_from_date, ym_from_epoch, extract_ym_from_frame, extract_ym_from_path; print('IMPORT OK')\"", "exit": 0, "stdout": "IMPORT OK"},
+    {"cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t05_vault_io_smoke.py", "exit": 0, "stdout": "VAULT_IO SMOKE OK"},
+    {"cmd": "python -c \"<row_count('hub_flight') vs pq.ParquetFile.metadata.num_rows>\"", "exit": 0, "stdout": "92929010 92929010 match=True"},
+    {"cmd": "pytest etl4/tests/ -q", "exit": 1, "note": "48 passed, 1 failed. Fail is PR4 sibling regression (see RISKS)."}
+  ],
+  "test_status": "48/1/0 (one sibling-PR4 regression not caused by T-05)",
+  "acceptance_criteria": {
+    "AC-1 syntax OK": "PASS",
+    "AC-2 IMPORT OK": "PASS",
+    "AC-3 smoke script VAULT_IO SMOKE OK": "PASS",
+    "AC-4 row_count parity on hub_flight monolith": "PASS (92929010)",
+    "AC-5 pytest 49/0/0": "PARTIAL (48/1/0; regression from parallel PR4 WIP, not T-05)",
+    "AC-6 Windows cp1252-safe": "PASS"
+  },
+  "next_action": "unit-tester to add T-25-style unit tests for vault_io (NEW task if desired beyond smoke); OR orchestrator can proceed to T-08/T-09/T-10/T-12/T-14/T-17/T-19/T-22/T-24a which are now unblocked.",
+  "unblocks": [
+    "T-08 raw_vault.py per-ym build loop",
+    "T-09 compact.py hub compaction",
+    "T-10 raw_vault_spark.py partitioned writes",
+    "T-12 migrate_partition_ym.py one-shot migration",
+    "T-14 marts.py partition-aware reads + per-ym writes",
+    "T-17 postgres_sink.py per-ym staged COPY",
+    "T-19 qa/reconcile.py row_count swap",
+    "T-22 run_e2e list_ym pre-flight drift check",
+    "T-24a pipeline_volumes.py row_count migration"
+  ],
+  "risks": [
+    "pytest regression (test_matrix_csv_written_after_every_cell) is caused by the uncommitted PR4 sibling changes in etl4/sink/postgres.py + etl4/vault/postgres_sink.py (git status at start showed 'M' on both). That sibling now INSERTs into pipeline_runs.ym which does not exist in the DB schema yet -- that ALTER TABLE lives in architecture section 2.3 and belongs to PR1 DDL follow-up. Not a T-05 bug; vault_io.py has zero import linkage to pipeline_runs.ym. Verified by git diff etl4/sink/postgres.py which shows the new ym column reference in write_run. Suggested remediation (orchestrator decision): (a) merge the PR1 DDL follow-up that adds pipeline_runs.ym first, or (b) stash the PR4 sibling while verifying T-05, or (c) pin the one test as xfail with a link to the PR4 blocker.",
+    "SYN-<hex> sentinel: write_partition accepts it, read_table/list_ym/extract_ym_from_path handle it, but it is deliberately not valid against pipeline_watermarks.last_ym CHECK regex. If callers write SYN partitions and then try to set a watermark with the same ym, the INSERT will fail -- this is intentional per architecture section 2.3 (synthetic matrix cells do not advance the calendar watermark)."
+  ],
+  "spec_gaps_resolved": [
+    "pd.concat(ignore_index=True) per file -- never pd.read_parquet(tree_root) (CLAUDE.md section 7).",
+    "Spark-writer shards: reader globs '<ym_dir>/*.parquet' (smoke CASE 8).",
+    "SYN sentinel accepted on write_partition / extract_ym_from_path uniformly."
+  ],
+  "windows_cp1252_safe": true,
+  "did_not_touch": [
+    "etl4/vault/watermark.py",
+    "etl4/vault/postgres_sink.py (PR4 parallel sibling)",
+    "etl4/sink/postgres.py (PR4 parallel sibling)",
+    "etl4/infra/create_tables.sql",
+    "any existing caller of pd.read_parquet (job is to BUILD the API, not migrate callers)"
+  ]
+}
