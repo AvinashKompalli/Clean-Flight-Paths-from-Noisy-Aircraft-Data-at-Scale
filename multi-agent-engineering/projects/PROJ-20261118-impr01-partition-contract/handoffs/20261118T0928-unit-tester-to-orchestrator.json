@@ -1,0 +1,35 @@
+{
+  "handoff_id": "20261118T0928-unit-tester-to-orchestrator",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-25",
+  "from_agent": "unit-tester",
+  "to_agent": "orchestrator",
+  "timestamp_utc": "2026-11-18T09:28:00Z",
+  "status": "APPROVED",
+  "summary": "Added etl4/tests/test_watermark.py covering T-02 watermark client with 9 test functions (15 parametrised cases). All 15 new tests pass; full suite 49/49 passes. Zero regressions. Zero residual rows after run. No production code touched.",
+  "tests_added": 15,
+  "tests_run": {
+    "passed": 49,
+    "failed": 0,
+    "skipped": 0
+  },
+  "coverage": "Not measured; pytest-cov not configured in repo. Coverage reasoning: all 2 public API functions exercised (get, set); all 3 regex-reject paths + 2 regex-accept paths of the CHECK constraint hit; both branches of INSERT ON CONFLICT (fresh insert + DO UPDATE); both commit and rollback paths of the caller-owned transaction.",
+  "failures": [],
+  "regressions": 0,
+  "production_issues_found": [],
+  "files_added": [
+    "etl4/tests/test_watermark.py",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-25.json",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0928-unit-tester-to-orchestrator.json"
+  ],
+  "files_modified": [],
+  "pytest_tail_focused": "============================= 15 passed in 2.10s ==============================",
+  "pytest_tail_full": "49 passed in 7.31s",
+  "fixture_notes": {
+    "layer_prefix": "__t25_",
+    "autouse_cleanup": "_scrub_test_rows yields after DELETE ... LIKE '__t25_%' and repeats on teardown",
+    "skip_marker": "pytestmark skipif(not _postgres_reachable()) so the suite degrades gracefully when etl4-postgres is down",
+    "no_mocks": "watermark.py's contract IS the Postgres CHECK regex + transaction semantics; mocking would invert the test"
+  },
+  "next_action": "ready for data-engineer review (T-02 coverage closed)"
+}
