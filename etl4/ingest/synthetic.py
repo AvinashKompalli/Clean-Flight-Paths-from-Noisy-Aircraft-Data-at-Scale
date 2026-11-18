@@ -2,8 +2,9 @@
 
 Output: data/bronze/raw_states/date=YYYY-MM-DD/hour=H/part-0.parquet
 Columns follow OpenSky state_vectors_data4.
-Fake noise is added on purpose: gaps, position jumps, and duplicates.
-Use it to test clean, reconstruct, and evaluate before real data arrives.
+Bronze emitted here is CLEAN. Controlled noise is applied downstream by
+`etl4/bench/noise.py::inject_noise` as part of the N0..N3 matrix, so that
+synthetic truth on disk is a lossless reference. See architecture.md.
 
 Every row generated here carries a stable `__truth_id` (monotonic int64,
 unique across the whole generated set) so downstream metric functions can
@@ -61,18 +62,6 @@ def make_flight(rng, icao24, t0, n_steps, step):
         "lastposupdate": t - 0.5,
         "lastcontact": t,
     })
-
-
-def add_noise(df, rng):
-    """Gaps, position jumps, duplicates. Keep a clean copy for ground truth."""
-    df = df.copy()
-    n = len(df)
-    jump = rng.random(n) < 0.002
-    df.loc[jump, "lat"] += rng.uniform(-1, 1, jump.sum())
-    df.loc[jump, "lon"] += rng.uniform(-1, 1, jump.sum())
-    df = df[rng.random(n) > 0.03]            # 3 % gaps
-    dup = df.sample(frac=0.005, random_state=int(rng.integers(1e6)))
-    return pd.concat([df, dup], ignore_index=True)
 
 
 def generate_synthetic(n_rows: int, seed: int = 42) -> pd.DataFrame:
@@ -138,10 +127,11 @@ def main():
             truth_offset, truth_offset + len(truth), dtype=np.int64
         )
         truth_offset += len(truth)
-        noisy = add_noise(truth, rng)[COLUMNS + [TRUTH_ID]]
+        truth["icao24"] = truth["icao24"].astype("string")
+        clean = truth[COLUMNS + [TRUTH_ID]]
         d = Path(a.out) / f"date={a.date}" / f"hour={h}"
         d.mkdir(parents=True, exist_ok=True)
-        noisy.sort_values("time").to_parquet(d / "part-0.parquet", index=False)
+        clean.sort_values("time").to_parquet(d / "part-0.parquet", index=False)
         clean_parts.append(truth)
 
     # Ground truth for evaluation tests.

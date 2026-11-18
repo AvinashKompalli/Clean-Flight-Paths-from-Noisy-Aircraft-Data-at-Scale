@@ -221,6 +221,25 @@ line 34, saw 18"). File is gitignored, dev-local, and only affects a
 developer's second local run. Fix: version the header, or wipe-and-regen
 on schema mismatch. Effort: 15 min.
 
+### IMPR-13 - clean up stale `synthetic.add_noise` comments
+**Severity: low (janitorial).** After IMPR-08 removed `synthetic.add_noise`,
+two stale comment references remain in files that were under IMPR-08's
+"Do NOT touch" scope: `etl4/bench/noise.py:48` and
+`etl4/bench/run_experiment.py:232`. Both are comments explaining historical
+behaviour that no longer exists. Replace the "synthetic.add_noise" references
+with "pre-noise synthetic bronze (IMPR-08)" or similar. 5-minute cleanup;
+bundle with another developer-backend commit. Owner: developer-backend.
+
+### IMPR-14 - per-cell smoothing divergence: N2 kinematic_smoothing rmse=1.45e6
+**Severity: medium.** After the IMPR-08 bronze cleanup, `kinematic_smoothing`
+at N2 shows `rmse_m = 1,445,595.8` while its N1 and N3 twins return `0.0`.
+This is a per-cell smoothing instability that existed before but was masked
+by the pre-IMPR-08 noise baseline. Likely related to IMPR-05 (Kalman CHI2
+gating at mid-noise levels), but the per-cell pattern (N2 broken, N3 clean)
+suggests a seed-sensitive numerical edge in the matrix routing rather than
+a pure gating issue. Diagnosis + fix: 2-4 hours. Owner: data-engineer.
+File: `etl4/reconstruct/kalman.py`. Could roll into IMPR-05 or stand alone.
+
 ### IMPR-12 - file flightlist->hub_flight 20.75% reconcile drift as standalone data-engineer ticket
 **Severity: medium (pre-existing, flagged as DEF-003 in T-008).** Reconcile
 check reports 20.748% drop between `bronze_flightlists` row-sum and
