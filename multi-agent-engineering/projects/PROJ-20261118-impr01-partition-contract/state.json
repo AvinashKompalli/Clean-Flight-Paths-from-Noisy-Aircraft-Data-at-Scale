@@ -1,0 +1,52 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "title": "IMPR-01: Implement the ym=YYYY-MM partition contract with watermark-driven incremental refresh",
+  "description": "Execute the ADR 2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh. Design is committed; this project is the implementation wave. Removes the 20-30 min full vault rebuild on any new month input and replaces TRUNCATE+COPY sink with INSERT ON CONFLICT. Prerequisite: PROJ-20261114-wi1-metrics reaches phase=DONE.",
+  "created_at_utc": "2026-11-18T05:08:00Z",
+  "updated_at_utc": "2026-11-18T05:08:00Z",
+  "phase": "PENDING_WI1_ACCEPTANCE",
+  "tasks": [],
+  "artifacts": {
+    "requirements": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+    "architecture": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md"
+  },
+  "approval_history": [],
+  "open_defects": [],
+  "change_requests": [],
+  "last_handoff": null,
+  "source_request": "User directive 2026-11-18: 'make the 3 suggestions I gave are also looked into and implemented if needed'. Orchestrator evaluation: IMPR-01 marked IMPLEMENT (strong PDF section 3 trace, design already committed as ADR, pure execution ahead). Full rationale in multi-agent-engineering/improvements_backlog.md IMPR-01 entry. Gate: PROJ-20261114-wi1-metrics must reach phase=DONE before this project advances past PENDING.",
+  "standing_rules": [
+    "CLAUDE.md at repo root is non-negotiable",
+    "plan.md and ETL4 (3) (1).pdf are the authoritative project brief",
+    "No Claude co-author trailer on commits (CLAUDE.md 2.1)",
+    "No secrets, no large data (CLAUDE.md 2.2, 2.3)",
+    "icao24 is pandas string dtype (CLAUDE.md 2.6)",
+    "Windows cp1252-safe output (CLAUDE.md 2.7)",
+    "Use tokens minimally (user standing rule)",
+    "Distributed agent dispatch - never idle on a single agent (user standing rule)"
+  ],
+  "upstream_design": {
+    "adr_id": "2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh",
+    "adr_path": "etl4/docs/decisions.md",
+    "scope_summary": [
+      "pipeline_watermarks(layer, table_name, last_ym, row_count, updated_at) table",
+      "Partition every parquet tree on ym=YYYY-MM (keep hub_aircraft, hub_airport, sat_aircraft_identity non-partitioned with a tiny compaction pass)",
+      "Vault: filter bronze by ym > last_ym; write per-month shards",
+      "Marts: per-month build, append to partitioned tree",
+      "Sink: INSERT ... ON CONFLICT per target per month (replaces TRUNCATE + COPY)",
+      "Matrix: add ym column + unique (ym, source, method, noise), ON CONFLICT DO NOTHING",
+      "eval_mart: become a view or incremental materialized view",
+      "Rewind CLI: python -m etl4.orchestration.rewind --layer vault --from 2022-03 --to 2022-05",
+      "Zero-reprocess migration: one-shot pyarrow pass per existing monolithic part.parquet split by extracted ym"
+    ],
+    "effort_estimate_days": "3-4",
+    "sub_pr_count_target": 5,
+    "risks_from_adr": [
+      "Cross-month flights (same hk_flight in two ym partitions) - reader-side merge rule, already specified",
+      "Small-hub uniqueness drift - compaction pass enforces",
+      "ym extraction asymmetry: flightlist bronze has in-file day; state bronze has it in the partition path",
+      "Watermark vs filesystem drift - startup QA check in run_e2e refuses to start if they disagree"
+    ]
+  },
+  "dispatch_chain_note": "On PROJ-20261114-wi1-metrics phase=DONE, orchestrator will: (1) set this project's phase to REQUIREMENTS, (2) dispatch product-owner with the pre-staged prompt at the scratchpad path above, (3) run the usual DAG. This project uses the same specialists and same runtime gates as WI-1."
+}

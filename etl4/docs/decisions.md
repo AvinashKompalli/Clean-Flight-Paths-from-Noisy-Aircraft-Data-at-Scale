@@ -183,3 +183,25 @@ Downstream impact is confined: `metrics.py` functions already accept the shapes 
 
 **Risks**: `clean.dedup` must gain an explicit `__truth_id` tiebreaker or duplicate-dropping becomes non-deterministic (documented in task T-002). `psutil` must be pinned if `bench/scale_study.py` ships in the same PR (documented separately if that change lands).
 
+### 2026-11-18 - eval_mart schema expansion, metric key alignment, and DROP VIEW first
+
+**Context**: `run_e2e.py::stage_eval_mart` built `fact_experiment_result` as a pivot of `pipeline_runs x eval_results`. Three latent bugs surfaced when WI-1 (PROJ-20261114-wi1-metrics) populated the new PDF Feature Metrics into the serving tier.
+
+1. The pivot column `rmse_m` looked up `metric='rmse_m'`, but `metrics.py` writes the key `position_rmse_m`. The lookup silently returned NULL, so the mart carried NULL rmse_m even when `eval_results` carried a real value.
+2. The CTE filtered `WHERE source='s3'`, pre-dating the WI-1 synthetic matrix. Synthetic cells therefore dropped out of the mart entirely.
+3. `stage_eval_mart` started with `DROP TABLE IF EXISTS fact_experiment_result`. Once `v_pareto_frontier` was added (ADR 2026-11-13, implementation in T-004), this failed with `DependentObjectsStillExist` because the view holds a dependency on the table.
+
+**Decision**: Three aligned changes in `stage_eval_mart`:
+
+- Extend the pivot to `MAX(CASE WHEN er.metric='position_rmse_m' THEN er.value END) AS rmse_m` and add four new pivoted columns (`seg_precision`, `seg_recall`, `coverage_ratio`, `boundary_err_s`) that were already written to `eval_results` by T-003 but had no mart home.
+- Drop the `WHERE source='s3'` filter. The mart now pivots across every ingest source; dashboards that need source-level separation filter in the panel SQL.
+- `DROP VIEW IF EXISTS v_pareto_frontier` before `DROP TABLE IF EXISTS fact_experiment_result`, then recreate the view at the tail with the same `rmse_m IS NOT NULL AND wall_secs IS NOT NULL` filter clause. Idempotent across repeated eval_mart runs.
+
+Column list in `fact_experiment_result` grows from 14 to 18: `run_id, run_date, source, method, noise, rows_in, rows_out, wall_secs, started_at, continuity, n_flights, n_deviations, rmse_m, seg_f1, seg_precision, seg_recall, coverage_ratio, boundary_err_s`. `cols` in the COPY statement extended to match.
+
+**Consequences**: WI-1's 12 synthetic matrix cells pivot cleanly, `v_pareto_frontier` returns 12 rows with populated `accuracy_y` and `cost_x`, dashboard 08's Pareto scatter and metric heatmap panels render against real data. The view recreate also future-proofs eval_mart against further additions to dependent-object trees downstream. No downstream consumer required a change because the dashboard already queried the new column names (T-006 was built against the architecture spec, not the pre-fix mart shape).
+
+**Alternatives considered**: Adding `COALESCE(er.metric='rmse_m', er.metric='position_rmse_m')` to tolerate both key names (rejected - masks future drift); converting `fact_experiment_result` to a materialized view so `v_pareto_frontier` recursively depends on it (rejected - requires manual refresh, defeats idempotence); using `CASCADE` on the DROP (rejected - too blunt, would silently drop any future dependent object).
+
+**Risks**: The `source='s3'` filter removal means cells from different sources commingle in the same mart row set. Dashboards that need to compare must filter by `source` explicitly. Documented in dashboard 08's reviewer-explainer markdown panel.
+

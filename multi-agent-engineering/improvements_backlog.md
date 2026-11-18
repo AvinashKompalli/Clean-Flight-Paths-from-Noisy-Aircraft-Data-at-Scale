@@ -221,6 +221,20 @@ line 34, saw 18"). File is gitignored, dev-local, and only affects a
 developer's second local run. Fix: version the header, or wipe-and-regen
 on schema mismatch. Effort: 15 min.
 
+### IMPR-12 - file flightlist->hub_flight 20.75% reconcile drift as standalone data-engineer ticket
+**Severity: medium (pre-existing, flagged as DEF-003 in T-008).** Reconcile
+check reports 20.748% drop between `bronze_flightlists` row-sum and
+`vault.hub_flight` row count, above the 2% tolerance. Pre-existing (predates
+WI-1); surfaced by the reconcile gate. Must be filed and triaged before
+IMPR-01 kickoff so the partition contract does not inherit an undiagnosed
+drop as noise in its own reconcile numbers. Owner: data-engineer. Likely
+root cause: `hub_flight` dedups on `hk_flight` which compresses multi-row
+bronze flights into one hub row; the 20% "drop" is actually correct dedupe
+behaviour, not a data loss. If confirmed, the reconcile check itself needs
+a per-table expectation shape (flightlists vs hub_flight is NOT 1:1), which
+is the real fix. Effort: 2 hours of diagnosis + 1 hour of reconcile.py
+tolerance-profile update.
+
 ### IMPR-11 - `run_matrix.py` auto-derive `--truth` from bronze for synthetic source
 **Severity: medium (dev-UX, surfaces as CRITICAL if forgotten).** DEF-001 required the developer to pass `--truth etl4/data/reference/synthetic_truth/2026-01-01.parquet` explicitly to the matrix CLI for N0 cells to score (inject_noise is skipped at N0 so no sidecar is produced). Without that flag, the metric block falls through and all 6 PDF-mandated metrics write NULL. `run_experiment.py:223` already has bronze-derived truth fallback logic - mirror the same into `run_matrix.py` so the CLI default is "just works". Effort: 1 hour. Owner: data-engineer or developer-backend. File: `etl4/bench/run_matrix.py`.
 
