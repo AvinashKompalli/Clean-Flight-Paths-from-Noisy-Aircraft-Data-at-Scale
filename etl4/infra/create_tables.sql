@@ -126,3 +126,24 @@ SELECT fer.method,
   FROM fact_experiment_result fer
  WHERE fer.rmse_m IS NOT NULL
    AND fer.wall_secs IS NOT NULL;
+
+-- Partition watermark registry (IMPR-01). One row per (layer, table_name)
+-- holds the highest ym=YYYY-MM already materialized. Readers compare against
+-- this to decide which months to (re)build. A missing row means "process
+-- everything from the earliest bronze" (vault bootstrap).
+--
+-- Written in the same transaction as the layer load so a crash cannot leave
+-- the watermark disagreeing with the storage. The CHECK regex rejects any
+-- non-calendar ym (e.g. '2022-7', '2022-13'). The sentinel 'SYN-<seed_hex>'
+-- used by synthetic matrix cells is NOT written to this table -- it only
+-- appears on pipeline_runs.ym, where no CHECK is applied.
+CREATE TABLE IF NOT EXISTS pipeline_watermarks (
+    layer       TEXT NOT NULL,
+    table_name  TEXT NOT NULL,
+    last_ym     TEXT NOT NULL,
+    row_count   BIGINT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (layer, table_name),
+    CHECK (last_ym ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')
+);
+CREATE INDEX IF NOT EXISTS idx_watermarks_layer ON pipeline_watermarks(layer);
