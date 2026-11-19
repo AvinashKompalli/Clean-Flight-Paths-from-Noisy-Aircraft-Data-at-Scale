@@ -1,0 +1,57 @@
+{
+  "task_id": "T-10",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR2",
+  "title": "raw_vault pandas + Spark: per-ym sat_state_observation + R13 fix",
+  "owner": "developer-backend",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "medium",
+  "objective": "Partition sat_state_observation per-ym on both code paths (raw_vault.py pandas + raw_vault_spark.py Spark). ym derived via ym_from_epoch inside each build; address R13 by pre-filtering bronze state files on the sat_state_observation watermark before any read.",
+  "depends_on": ["T-02 (watermark, DONE)", "T-05 (vault_io, DONE)", "T-08 (raw_vault flightlist loop, DONE)"],
+  "unblocks": ["T-12 (migrate_partition_ym can skip sat_state_observation when already partitioned)", "T-14 (marts fact_trajectory_enriched read now partition-aware)"],
+  "files_changed": [
+    {"path": "etl4/vault/raw_vault.py", "change": "modified", "note": "Added: defaultdict import; _group_state_files_by_ym helper (path-derived ym pre-filter); _build_sat_state_observation_per_ym (per-ym read, build, in-file ym via ym_from_epoch, write_partition + _DONE, per-ym watermark txn). Modified build_raw_vault: states_hub_input now filters by sat watermark (R13 fix); pandas branch calls _build_sat_state_observation_per_ym; include_states=False branch now reports vault_io.row_count instead of truncating the existing monolith/tree."},
+    {"path": "etl4/vault/raw_vault_spark.py", "change": "modified", "note": "Added: _SAT_COLS_WITH_YM; ym column inside _build_group via utc-fixed pandas (never Spark date_format); ym field in _output_schema. build_sat_state_observation_spark rewritten: per-ym loop, watermark pre-filter (R13), resume via _partition_done, coalesce(1) + os.replace onto deterministic ym=YYYY-MM/part.parquet, _DONE sentinel, per-ym watermark txn. Removed shutil.rmtree(out_dir) at top (was wiping prior months)."},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t10_sat_smoke.py", "change": "new", "note": "Three-run smoke: bootstrap (2 partitions), resume no-op (mtime-equality + 7x faster), R13 (watermark=2022-06 against two-month fixture produces only ym=2026-11). Snapshots/restores ('vault',*) watermark rows. Uses real bronze head(5000) of date=2022-06-27 and date=2026-11-12."},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-10.json", "change": "new"}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "statement": "Syntax: both raw_vault.py and raw_vault_spark.py parse", "status": "PASS", "evidence": "python -c 'import ast; ast.parse(open(f).read()) for f in [...]' -> 'syntax OK'"},
+    {"id": "AC-2", "statement": "IMPORT OK for build_raw_vault + build_sat_state_observation_spark", "status": "PASS", "evidence": "python -c 'from etl4.vault.raw_vault import build_raw_vault; from etl4.vault.raw_vault_spark import build_sat_state_observation_spark; print(\"IMPORT OK\")' -> 'IMPORT OK'"},
+    {"id": "AC-3", "statement": "Smoke at artifacts/t10_sat_smoke.py: builds sat_state_observation on a scratch 2-month fixture; verifies 2 partitions ym=YYYY-MM/part.parquet created; watermark advances; second run is no-op", "status": "PASS", "evidence": "RUN 1: sat_state_observation/ym=2022-06=5,000 + ym=2026-11=5,000; both ym=YYYY-MM/part.parquet + _DONE sentinel land; watermark ('vault','sat_state_observation') advances to 2026-11. RUN 2: 'no new months to process'; mtime unchanged on both partitions; count 10,000 preserved."},
+    {"id": "AC-4", "statement": "R13 fix: watermark=2022-06 against bronze with 2022-06 + 2026-11 processes ONLY 2026-11. Verify timing: second run measurably faster.", "status": "PASS", "evidence": "RUN 3 (fresh out_dir, watermark preset to 2022-06): yms_on_disk=['ym=2026-11'] only; _group_state_files_by_ym('2022-06') returns {'2026-11'} only; watermark advanced 2022-06 -> 2026-11. Timing: run1=0.387s, run2(resume)=0.052s (7.4x faster), run3(R13 half-work)=0.237s (0.6x run1 -- processes 1 month instead of 2)."},
+    {"id": "AC-5", "statement": "pytest etl4/tests/ -q still 92/0/0", "status": "PASS", "evidence": "'92 passed in 7.69s'. Baseline before edits: '92 passed in 9.34s'. Zero regressions."},
+    {"id": "AC-6", "statement": "Windows cp1252-safe stdout (no arrows, no em-dashes, no en-dashes)", "status": "PASS", "evidence": "Byte scan of all three files: no code points > 255, no U+2192/U+2014/U+2013. Smoke run under PowerShell / conda opensky env prints SAT_SMOKE OK with no UnicodeEncodeError."}
+  ],
+  "commands_run": [
+    {"cmd": "python -c \"import ast; ast.parse(open('etl4/vault/raw_vault.py').read()); ast.parse(open('etl4/vault/raw_vault_spark.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+    {"cmd": "python -c \"from etl4.vault.raw_vault import build_raw_vault; from etl4.vault.raw_vault_spark import build_sat_state_observation_spark; print('IMPORT OK')\"", "exit": 0, "stdout": "IMPORT OK"},
+    {"cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t10_sat_smoke.py", "exit": 0, "stdout_tail": "SAT_SMOKE OK"},
+    {"cmd": "pytest etl4/tests/ -q", "exit": 0, "stdout_tail": "92 passed in 7.69s"},
+    {"cmd": "cp1252 byte scan on raw_vault.py / raw_vault_spark.py / t10_sat_smoke.py", "exit": 0, "stdout": "all three: OK"}
+  ],
+  "integration_points": {
+    "reads": "bronze state parquet under <states_dir>/date=YYYY-MM-DD/hour=HH/*.parquet (filtered via extract_ym_from_path + sat watermark); pipeline_watermarks ('vault','sat_state_observation') via watermark.get",
+    "writes": "<out_dir>/sat_state_observation/ym=YYYY-MM/part.parquet via vault_io.write_partition (pandas) or Spark coalesce(1)+os.replace; <out_dir>/sat_state_observation/ym=YYYY-MM/_DONE sentinel; pipeline_watermarks row ('vault','sat_state_observation') upserted per ym via watermark.set, each in its own psycopg transaction",
+    "consumers": ["etl4/vault/marts.py T-14 (fact_trajectory_enriched read via vault_io.read_table(ym_filter=...))", "etl4/scripts/migrate_partition_ym.py T-12 (sat_state_observation now already-partitioned path)", "etl4/orchestration/rewind.py T-21 (sat_state_observation under PARTITIONED_VAULT)"]
+  },
+  "contract_deviations": [
+    "Task text 'advance watermark.set in the SAME psycopg txn as the other vault watermarks (follow T-08 pattern -- all per-ym advances in one txn per ym)' is slightly reframed: the sat watermark cannot share the flightlist per-ym txn because the two live on different ym axes (flightlist month vs state-vector month). The implementation keeps T-08's pattern faithfully: per-ym, one psycopg transaction covers the write + the watermark upsert. The sat loop's per-ym txn is its own. Same semantic guarantee -- crash after write but before watermark leaves consistent state and a safe rerun.",
+    "Task text 'use ym derived via vault_io.ym_from_epoch(df[\"time\"])' kept literally in the pandas path. In the Spark path the same semantics (utc-fixed pandas to_datetime + strftime) are inlined into _build_group so the UDF does not have to import vault_io on the executor; the two helpers produce byte-identical results. Verified on real bronze: path-derived ym (date=/hour=) matches per-row epoch ym on both 2022-06-27 and 2026-11-12."
+  ],
+  "spec_gaps_resolved": [
+    "Task silent on 'what if the row's epoch ym disagrees with its path ym'. Implemented: assertion in _build_sat_state_observation_per_ym that set(epoch_ym) == {path_ym} per file group. On live bronze both agree. The assertion fails loudly rather than silently os.replace-ing a prior month's partition if upstream ever ships a row carrying a different month.",
+    "Task silent on 'include_states=False should not truncate existing sat_state_observation'. Previous code wrote an empty monolith via _write(pd.DataFrame(), ...) which would clobber a real 333M-row table. Replaced with vault_io.row_count(... root=out_dir); no writes.",
+    "Spark path: deterministic ym=YYYY-MM/part.parquet produced via coalesce(1) + os.replace of the single shard from a tmp dir (tmp name does NOT match 'ym=*' glob so readers never pick up a half-written shard)."
+  ],
+  "risks": [
+    "Late-arriving data: a bronze file dropped later into an already-watermark-advanced month will NOT be re-read (R13 filter uses month-granular watermark + per-ym _DONE). Known architectural limitation; matters for live REST in the current month. The rewind primitive (T-21, DONE) is the explicit path to re-process a month.",
+    "Spark path NOT executed in smoke -- pyspark not installed in the opensky conda env on this host. Syntax + import verified only. Logic parallels pandas path and shares _group_state_files_by_ym / _partition_done / _write_done. Full Spark run is a functional-tester task (T-26).",
+    "Per-run load_dt remains datetime.now(timezone.utc). Same pre-existing non-determinism T-11 flagged on T-08."
+  ],
+  "windows_cp1252_safe": true,
+  "test_status": "92/0/0 (baseline preserved)",
+  "r13_addressed": true,
+  "timestamp_utc": "2026-11-19T12:00:00Z"
+}

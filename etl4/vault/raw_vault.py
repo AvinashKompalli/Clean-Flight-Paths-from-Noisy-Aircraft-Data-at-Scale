@@ -79,19 +79,6 @@ def _load_parquet_tree(path: Path) -> pd.DataFrame:
     return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
 
-def _write(df: pd.DataFrame, name: str, out_dir: Path) -> int:
-    """Write one vault table as a single monolith parquet. Returns row count.
-
-    Used only by the sat_state_observation path (pandas branch) and the
-    empty-table fallback in build_raw_vault. The partitioned flightlist
-    writers call vault_io.write_partition directly.
-    """
-    dst = out_dir / name / "part.parquet"
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(dst, index=False)
-    return len(df)
-
-
 def _atomic_write_monolith(df: pd.DataFrame, name: str, out_dir: Path) -> int:
     """Write a single-file (non-partitioned) vault table atomically.
 
@@ -356,13 +343,12 @@ def _group_state_files_by_ym(states_dir: Path,
                              last_ym: str | None) -> dict[str, list[Path]]:
     """Group raw_states bronze files by path-derived ym; drop ym <= last_ym.
 
-    R13 fix: paths carry month in their ``date=YYYY-MM-DD`` segment, so we
-    can filter without reading the parquet. Verified against the live
-    bronze that path ym and epoch ym agree for every row inside the file.
-    The per-row epoch ym is still computed on read as the in-file column
-    so a future out-of-month row would fail the write-side assertion in
-    ``_build_sat_state_observation_per_ym`` loudly rather than overwriting
-    a prior month's partition.
+    Paths carry month in their ``date=YYYY-MM-DD`` segment, so filtering
+    happens without reading the parquet. Live bronze has path ym and
+    per-row epoch ym in agreement; the per-row epoch ym is still computed
+    on read as the in-file column so a future out-of-month row fails the
+    write-side assertion in ``_build_sat_state_observation_per_ym`` loudly
+    rather than overwriting a prior month's partition on write.
     """
     out: dict[str, list[Path]] = defaultdict(list)
     if not states_dir.exists():
@@ -383,14 +369,19 @@ def _build_sat_state_observation_per_ym(states_dir: Path, out_dir: Path,
                                         dsn: str = DSN_DEFAULT) -> int:
     """Per-ym build of sat_state_observation from raw_states bronze (pandas).
 
-    R13 fix: only files under ``date=YYYY-MM-*`` with ym > watermark are
-    read. Each resulting partition lands at
+    Only files under ``date=YYYY-MM-*`` with ym > watermark are read.
+    Each resulting partition lands at
     ``<out_dir>/sat_state_observation/ym=YYYY-MM/part.parquet`` with a
-    ``_DONE`` sentinel; watermark advances per ym in its own txn.
+    ``_DONE`` sentinel; the watermark advances per ym in its own
+    transaction. The sat watermark key is a separate row from the four
+    flightlist-vault keys (different ym axes: flightlist month vs
+    state-vector month) so the per-ym commit cannot share the flightlist
+    transaction.
 
-    The sat watermark key is a separate row from the four flightlist-vault
-    keys (different ym axes: flightlist month vs state-vector month) so
-    the per-ym commit cannot share the flightlist txn.
+    Resumed partitions (``_DONE`` + ``part.parquet`` both present) still
+    re-upsert the watermark row so a crash between a successful partition
+    write and the previous watermark commit cannot leave the registry
+    stuck behind a materialised month.
     """
     state_cols = ["icao24", "time", "lat", "lon", "baroaltitude",
                   "velocity", "heading", "vertrate", "callsign", "onground"]
@@ -410,8 +401,14 @@ def _build_sat_state_observation_per_ym(states_dir: Path, out_dir: Path,
 
     for ym in sorted(files_by_ym):
         if _partition_done("sat_state_observation", ym, out_dir):
+            rc = vault_io.row_count("sat_state_observation", ym_filter=ym,
+                                    root=out_dir)
+            with psycopg.connect(dsn) as conn:
+                watermark.set("vault", "sat_state_observation", ym, rc, conn)
+                conn.commit()
             print(f"    sat_state_observation/ym={ym}: resumed "
-                  f"(part.parquet + _DONE)", flush=True)
+                  f"(part.parquet + _DONE); watermark reaffirmed",
+                  flush=True)
             continue
 
         frames = []
@@ -601,8 +598,8 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
     # pandas read_parquet(columns=...) is more tolerant of per-file schema
     # drift (e.g. mixed int64 vs dictionary types on ancillary columns like
     # `hour`, which pyarrow's dataset loader refuses to merge).
-    # R13 fix: filter the hub icao24 projection by the sat watermark so a
-    # rerun against the same bronze does not re-scan months already folded.
+    # The hub projection is filtered by the sat watermark so a rerun
+    # against the same bronze does not re-scan months already folded.
     states_hub_input = pd.DataFrame(columns=["icao24"])
     if include_states and states_dir.exists():
         sat_last_ym = watermark.get("vault", "sat_state_observation")
@@ -635,9 +632,10 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
             states_dir, out_dir, load_dt,
         )
     else:
-        # include_states=False: do NOT truncate the existing partitioned tree
-        # (pre-T-12 this was a 333M-row monolith; post-T-12 it is the
-        # authoritative ym=*/part.parquet set). Just report the current count.
+        # include_states=False: do NOT truncate the existing partitioned
+        # tree (prior shape was a multi-GB monolith; current shape is the
+        # authoritative ym=*/part.parquet set). Just report the current
+        # count.
         counts["sat_state_observation"] = vault_io.row_count(
             "sat_state_observation", root=out_dir,
         )
