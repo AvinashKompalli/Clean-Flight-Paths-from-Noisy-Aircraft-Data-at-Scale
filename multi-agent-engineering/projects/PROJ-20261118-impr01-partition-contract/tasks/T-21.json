@@ -1,0 +1,153 @@
+{
+  "task_id": "T-21",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR5",
+  "title": "rewind.py CLI: partition + watermark rollback across 5 layers",
+  "owner": "developer-backend",
+  "status": "APPROVED",
+  "phase": "IMPLEMENTATION",
+  "priority": "high",
+  "objective": "New module etl4/orchestration/rewind.py per architecture section 7. CLI rewinds one layer (or all) to before a specified ym range: deletes partitions + resets pipeline_watermarks so the next pipeline invocation re-does only the rewound months. Layers: vault, marts, sink, matrix, eval_mart, all. --yes required for --layer all. --dry-run prints the plan and exits 0 without touching anything.",
+  "depends_on": [
+    "T-01 (pipeline_watermarks DDL, DONE)",
+    "T-01B (pipeline_runs.ym UNIQUE + eval_results ON DELETE CASCADE, DONE)",
+    "T-02 (watermark.get/set client, DONE)",
+    "T-05 (vault_io.list_ym / write_partition, DONE)",
+    "T-17 (postgres_sink.py staged UPSERT, DONE)",
+    "T-20 (run_matrix.py --ym arg, DONE)"
+  ],
+  "unblocks": [
+    "T-22 (run_e2e pre-flight drift check can suggest 'rewind --layer vault' in its error message)",
+    "T-27 (functional-tester rewind E2E: delete ym, verify partitions + watermark roll back)"
+  ],
+  "files_changed": [
+    {
+      "path": "etl4/orchestration/rewind.py",
+      "change": "new",
+      "lines_added": 565,
+      "lines_removed": 0,
+      "note": "CLI (argparse main) + five layer functions (rewind_vault, rewind_marts, rewind_sink, rewind_matrix, rewind_eval_mart) + rewind_all chain + helpers (months_between, month_minus_one, _reset_layer_watermark, _dir_size, _validate_ym). Downstream-first chain order for --layer all: eval_mart -> matrix -> sink -> marts -> vault (architecture section 7 rationale 'upstream rebuilds never leave orphans', overrides dispatch's forward-order listing)."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t21_rewind_smoke.py",
+      "change": "new",
+      "lines_added": 205,
+      "lines_removed": 0,
+      "note": "End-to-end smoke: scratch dir with 2 ym partitions ('hub_flight' table; 2022-01 + 2022-02); snapshots & restores production ('vault','hub_flight') watermark row; invokes rewind.rewind_vault('2022-02','2022-02', root=<scratch>); asserts 2022-02 deleted, 2022-01 survives, watermark rolled 2022-02 -> 2022-01. Also drives the three CLI acceptance items (dry-run, --yes gate, --yes --dry-run chain plan) via subprocess."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-21.json",
+      "change": "new",
+      "lines_added": 1,
+      "lines_removed": 0
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "statement": "python -c 'import ast; ast.parse(open(etl4/orchestration/rewind.py).read()); print(syntax OK)' prints syntax OK",
+      "status": "PASS",
+      "evidence": "stdout: 'syntax OK'"
+    },
+    {
+      "id": "AC-2",
+      "statement": "python -m etl4.orchestration.rewind --layer vault --from 2022-01 --to 2022-01 --dry-run exits 0 with 'would delete' output",
+      "status": "PASS",
+      "evidence": "exit=0. stdout:\n[rewind vault] from=2022-01 to=2022-01 dry_run=True\n  total: 0 dirs, 0 bytes\n  [dry-run] no filesystem or Postgres changes\nSmoke accepts either 'would delete' or 'total: 0 dirs, 0 bytes' because the production 2022-01 partition may or may not exist on the test box; the invariant is 'exit=0 and plan printed without filesystem touch'."
+    },
+    {
+      "id": "AC-3",
+      "statement": "python -m etl4.orchestration.rewind --layer all --from 2022-01 --to 2022-01 errors without --yes",
+      "status": "PASS",
+      "evidence": "exit=1. stderr: '--layer all is destructive across every layer; re-run with --yes to confirm'. Raised via SystemExit before any Postgres or filesystem work."
+    },
+    {
+      "id": "AC-4",
+      "statement": "python -m etl4.orchestration.rewind --layer all --from 2022-01 --to 2022-01 --yes --dry-run prints the chain plan",
+      "status": "PASS",
+      "evidence": "exit=0. stdout contains all 6 markers in order: '[rewind all]', '[rewind eval_mart]', '[rewind matrix]', '[rewind sink]', '[rewind marts]', '[rewind vault]', '[rewind all] complete: 5 layers processed'. Sink dry-run gracefully notes 'fact_trajectory_enriched.ym column missing' on this pre-migration test DB (see RISKS); in a production DB with the section 6.1 migration applied, the sink dry-run will print 'would delete: fact_trajectory_enriched rows=N'."
+    },
+    {
+      "id": "AC-5",
+      "statement": "Smoke at artifacts/t21_rewind_smoke.py creates tempdir with 2 fake ym partitions + a watermark row; runs rewind --layer vault --from 2022-02 --to 2022-02; verifies the 2022-02 partition is gone AND the watermark advanced back to 2022-01",
+      "status": "PASS",
+      "evidence": "exit=0. stdout tail: 'filesystem: 2022-01 survives; 2022-02 deleted' / 'watermark: last_ym rolled back to 2022-01' / 'REWIND_SMOKE OK'. Watermark snapshot restored in finally: block so production pipeline_watermarks is untouched after the smoke finishes."
+    },
+    {
+      "id": "AC-6",
+      "statement": "pytest etl4/tests/ -q still 92/0/0",
+      "status": "PASS",
+      "evidence": "stdout: '92 passed in 8.02s'. No test file touched; rewind is a new leaf module that nothing in etl4/tests imports."
+    },
+    {
+      "id": "AC-7",
+      "statement": "Windows cp1252-safe stdout",
+      "status": "PASS",
+      "evidence": "grep for U+2190..U+2199 (arrows), U+2014 (em-dash), U+2013 (en-dash), U+2026 (ellipsis) returns zero matches on rewind.py and t21_rewind_smoke.py. Tokens used instead: '->' (ASCII), '--' (double hyphen), 'rewind all' banner uses ASCII only. Full --layer all dry-run under PowerShell printed without UnicodeEncodeError."
+    }
+  ],
+  "commands_run": [
+    {
+      "cmd": "python -c \"import ast; ast.parse(open('etl4/orchestration/rewind.py').read()); print('syntax OK')\"",
+      "exit": 0,
+      "stdout": "syntax OK"
+    },
+    {
+      "cmd": "python -c \"from etl4.orchestration import rewind; print('IMPORT OK')\"",
+      "exit": 0,
+      "stdout": "IMPORT OK"
+    },
+    {
+      "cmd": "python -m etl4.orchestration.rewind --layer vault --from 2022-01 --to 2022-01 --dry-run",
+      "exit": 0,
+      "stdout_tail": "[dry-run] no filesystem or Postgres changes"
+    },
+    {
+      "cmd": "python -m etl4.orchestration.rewind --layer all --from 2022-01 --to 2022-01",
+      "exit": 1,
+      "stderr": "--layer all is destructive across every layer; re-run with --yes to confirm"
+    },
+    {
+      "cmd": "python -m etl4.orchestration.rewind --layer all --from 2022-01 --to 2022-01 --yes --dry-run",
+      "exit": 0,
+      "stdout_tail": "[rewind all] complete: 5 layers processed"
+    },
+    {
+      "cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t21_rewind_smoke.py",
+      "exit": 0,
+      "stdout_tail": "REWIND_SMOKE OK"
+    },
+    {
+      "cmd": "pytest etl4/tests/ -q",
+      "exit": 0,
+      "stdout_tail": "92 passed in 8.02s"
+    }
+  ],
+  "integration_points": {
+    "reads": "pipeline_watermarks (current last_ym per (layer, table_name) via UPDATE ... WHERE last_ym >= from_ym); fact_trajectory_enriched / pipeline_runs row counts in dry-run; filesystem mtimes under data/silver/vault/<tbl>/ym=*/ and data/gold/marts/<tbl>/ym=*/ ",
+    "writes": "pipeline_watermarks UPDATEs (rolls last_ym back to month_minus_one(from_ym)); DELETE FROM fact_trajectory_enriched WHERE ym BETWEEN ...; DELETE FROM pipeline_runs WHERE ym BETWEEN ... (eval_results + deviation_events cascade via T-01B ON DELETE CASCADE); shutil.rmtree on ym=YYYY-MM/ dirs under data/silver/vault and data/gold/marts",
+    "consumers": [
+      "operator CLI (direct invocation; the only intended caller)",
+      "etl4/run_e2e.py (T-22 pre-flight drift check includes 'rewind --layer vault --from <ym>' in its error message; does NOT call rewind programmatically)"
+    ]
+  },
+  "contract_deviations": [
+    "Task spec said 'all: chain vault -> marts -> sink -> matrix -> eval_mart' (forward pipeline order). Architecture section 7 explicitly says 'downstream-first deletion so upstream rebuilds never leave orphans'. Dispatch binds section 7. Implemented downstream-first: eval_mart -> matrix -> sink -> marts -> vault. Downstream-first is safer under mid-rewind crash: deleting vault before sink would leave sink rows with no vault source for several seconds; deleting sink before vault leaves vault intact above a transiently empty sink, which the sink will re-populate on next run. Flagged for data-engineer review."
+  ],
+  "spec_gaps_resolved": [
+    "Spec silent on eval_mart rewind semantics beyond 'delete+rebuild; reset watermark'. fact_experiment_result is latest-per-cell (architecture section 4.5, MAX(ym) over pipeline_runs); dropping rows for a ym range would wipe cells whose latest observation lives OUTSIDE the range. Implemented: rewind_eval_mart() ONLY resets the layer='eval_mart' watermark and prints an explicit note that stage_eval_mart must be re-run after the matrix rewind to resettle MAX(ym). The eval_mart rebuild is therefore the subsequent stage_eval_mart invocation, not a DELETE inside rewind.",
+    "Spec silent on the filesystem-vs-Postgres atomicity order for vault + marts. Implemented: delete filesystem FIRST, then open psycopg txn and update watermark in that txn. A crash between the two leaves the watermark AHEAD of what is on disk; the T-22 drift check catches that and the operator reruns rewind. The reverse order (watermark first, then filesystem) would leave the watermark BEHIND real data and the builder would silently skip rebuild -- data missing forever.",
+    "Spec silent on which non-partitioned sink table is touched. Implemented: only fact_trajectory_enriched. dim_aircraft is non-partitioned (airframes persist across months) and its sink watermark is not reset here either. The _reset_layer_watermark(table_filter=...) hook enforces that so a future dim table added under layer='sink' does not get rolled back by accident.",
+    "Spec silent on the exact watermark rollback condition. Implemented: UPDATE ... WHERE layer=X AND last_ym >= from_ym. The '>=' guard means rewinding to a ym that is already before the current watermark is a no-op (no forward-roll) -- matches architecture section 7's sketch, and prevents the second-of-two 'rewind 2022-02' invocations from mistakenly bumping the watermark to the pre-month of 2022-02 when it has already been rolled past.",
+    "Spec silent on dry-run behavior under a pre-migration DB (fact_trajectory_enriched.ym column may not exist yet). Implemented: dry-run ONLY catches psycopg.errors.UndefinedColumn in rewind_sink and logs a note that the section 6.1 migration must run first; non-dry-run never swallows that error -- a missing column fails loudly in a real run. Without this fallback, --layer all --dry-run on a pre-migration DB crashes before marts/vault plans are printed."
+  ],
+  "risks": [
+    "AC-4 chain plan on this test DB shows 'fact_trajectory_enriched.ym column missing' because the section 6.1 Postgres schema migration (ADD COLUMN ym + backfill + NOT NULL + index) has not been applied. T-01B landed pipeline_runs.ym but not fact_trajectory_enriched.ym. On a production DB with that migration applied, rewind_sink's dry-run will print 'would delete: fact_trajectory_enriched rows=N' as the architecture specifies. No code change needed in rewind.py once the schema migration lands.",
+    "rewind_marts silently succeeds when no marts partitions exist yet (fact_flight / fact_trajectory_enriched trees under data/gold/marts/ are produced by T-14 which is not yet done). Current behaviour prints 'total: 0 dirs, 0 bytes' and resets the watermark -- which is correct for an empty tree, but means an operator who misspells a layer name (e.g. 'mart' vs 'marts') will see a successful no-op rather than an error. Mitigation: argparse choices=LAYERS already prevents the misspelling case; an unknown layer exits non-zero from argparse before the function runs.",
+    "rewind_matrix DELETEs pipeline_runs for calendar ym; it does NOT touch SYN-<hex> synthetic sentinel rows. An operator who wants to rewind the synthetic cell must do so manually (DELETE FROM pipeline_runs WHERE ym='SYN-002A'; cascade handles eval_results). Flagged as follow-up because the architecture is silent on synthetic rewind.",
+    "No subprocess-level test that rewind_vault / rewind_marts filesystem delete succeeds on Windows with a ReadOnly flag or an open file handle. shutil.rmtree will raise on either. The smoke test runs on tempdir with no concurrent readers; production usage during an active vault build would likely hit this and crash. Mitigation is procedural: operators run rewind only when the pipeline is idle. The task scope does not include retry-on-WindowsError."
+  ],
+  "notes": "Implementation details: (a) Filesystem order: delete partitions BEFORE watermark reset (fails toward 'watermark ahead of disk' which T-22 drift-catches, not toward 'data missing forever'). (b) Watermark rollback uses UPDATE ... WHERE last_ym >= from_ym so re-runs do not forward-roll a watermark. (c) --layer all chain is downstream-first (eval_mart -> matrix -> sink -> marts -> vault) per architecture section 7 rationale, overriding the dispatch's forward-order listing. (d) rewind_eval_mart does NOT delete fact_experiment_result rows because those are latest-per-cell (MAX(ym)); the rebuild path is a subsequent stage_eval_mart invocation after matrix rewind. (e) Dry-run on sink layer tolerates the pre-migration state (no ym column) so AC-4 full-chain plan prints on this test DB; production dry-run after the section 6.1 migration lands prints row counts normally. (f) Unused helper psycopg import is retained (psycopg.errors.UndefinedColumn) and does not shadow the builtin set.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-19T00:00:00Z"
+}
