@@ -5,15 +5,23 @@ Reads:
   data/bronze/raw_states/date=*/hour=*/part.parquet S3 state vectors
   data/bronze/synthetic/date=*/hour=*/part.parquet  Synthetic (opt-in)
 
-Writes (insert-only; duplicate business keys are deduped):
-  data/silver/vault/hub_aircraft/
-  data/silver/vault/hub_airport/
-  data/silver/vault/hub_flight/
-  data/silver/vault/link_flight_aircraft/
-  data/silver/vault/link_flight_route/
-  data/silver/vault/sat_aircraft_identity/
-  data/silver/vault/sat_flight_summary/
-  data/silver/vault/sat_state_observation/
+Writes partitioned (one part.parquet per ym=YYYY-MM):
+  data/silver/vault/hub_flight/ym=YYYY-MM/part.parquet
+  data/silver/vault/link_flight_aircraft/ym=YYYY-MM/part.parquet
+  data/silver/vault/link_flight_route/ym=YYYY-MM/part.parquet
+  data/silver/vault/sat_flight_summary/ym=YYYY-MM/part.parquet
+  data/silver/vault/sat_state_observation/ym=YYYY-MM/part.parquet
+
+Writes non-partitioned (globally unique entities, compacted):
+  data/silver/vault/hub_aircraft/part.parquet
+  data/silver/vault/hub_airport/part.parquet
+  data/silver/vault/sat_aircraft_identity/part.parquet
+
+Incremental contract (ADR 2026-11-13, IMPR-01):
+  * `watermark.get('vault', 'hub_flight')` returns the last fully-processed
+    ym. Bronze files whose ym <= last_ym are skipped.
+  * Each per-ym transaction commits the four partitioned writes, the
+    small-hub compaction, and the watermark advance atomically.
 
 Schema: see etl4/docs/data_vault_design.md.
 """
@@ -21,19 +29,43 @@ from __future__ import annotations
 
 import argparse
 import gc
-import shutil
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import duckdb
 import pandas as pd
+import psycopg
+import pyarrow as pa
+import pyarrow.parquet as pq
 
+from etl4.vault import vault_io, watermark
 from etl4.vault.schema import hash_series
 
 ROOT = Path(__file__).resolve().parents[2]
 VAULT_DIR         = ROOT / "data" / "silver" / "vault"
 FLIGHTLIST_BRONZE = ROOT / "data" / "bronze" / "flightlists"
 STATES_BRONZE     = ROOT / "data" / "bronze" / "raw_states"
+
+DSN_DEFAULT = os.getenv(
+    "POSTGRES_DSN",
+    "postgresql://etl4:change_me@localhost:5432/etl4",
+)
+
+# Four flightlist-derived tables land per-ym under ym=YYYY-MM/part.parquet.
+# sat_state_observation is partitioned too but built from raw_states, not here
+# (T-10 handles the state path in raw_vault.py/raw_vault_spark.py).
+PARTITIONED_TABLES: tuple = (
+    "hub_flight",
+    "link_flight_aircraft",
+    "link_flight_route",
+    "sat_flight_summary",
+)
+
+NON_PARTITIONED_TABLES: tuple = (
+    "hub_aircraft",
+    "hub_airport",
+    "sat_aircraft_identity",
+)
 
 
 def _load_parquet_tree(path: Path) -> pd.DataFrame:
@@ -47,10 +79,34 @@ def _load_parquet_tree(path: Path) -> pd.DataFrame:
 
 
 def _write(df: pd.DataFrame, name: str, out_dir: Path) -> int:
-    """Write one vault table as a single parquet. Returns row count."""
+    """Write one vault table as a single monolith parquet. Returns row count.
+
+    Used only by the sat_state_observation path (pandas branch) and the
+    empty-table fallback in build_raw_vault. The partitioned flightlist
+    writers call vault_io.write_partition directly.
+    """
     dst = out_dir / name / "part.parquet"
     dst.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(dst, index=False)
+    return len(df)
+
+
+def _atomic_write_monolith(df: pd.DataFrame, name: str, out_dir: Path) -> int:
+    """Write a single-file (non-partitioned) vault table atomically.
+
+    tmp + os.replace keeps the small-hub compaction crash-safe: if the
+    process dies mid-write, the previous monolith is still the authority
+    on next run. The non-partitioned tables are the only accumulated
+    history for hub_aircraft / hub_airport / sat_aircraft_identity, so a
+    torn write would permanently drop entities.
+    """
+    dst_dir = out_dir / name
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    final = dst_dir / "part.parquet"
+    tmp = dst_dir / (".part.parquet.%d.tmp" % (os.getpid(),))
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    pq.write_table(table, tmp, compression="snappy")
+    os.replace(tmp, final)
     return len(df)
 
 
@@ -241,45 +297,6 @@ _FINAL_DEDUP = {
 }
 
 
-def _duckdb_dedup_shards(shard_dir: Path, final_path: Path, keys: list[str],
-                         tmp_dir: Path, memory_limit: str = "4GB",
-                         threads: int = 4) -> int:
-    """Stream-dedup every parquet shard under shard_dir into final_path.
-
-    PARTITION BY the business key, ORDER BY the per-shard filename so the
-    first-file-seen contract from the pandas path is preserved (numbered
-    `part-NNN.parquet` sort before `zzz_extras.parquet`). DuckDB spills the
-    hash+sort to tmp_dir, so peak RAM is memory_limit, not the shards' total
-    size. Returns the row count written.
-    """
-    shard_glob = str(shard_dir / "*.parquet").replace("\\", "/")
-    final_out  = str(final_path).replace("\\", "/")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir_s  = str(tmp_dir).replace("\\", "/")
-    partition  = ", ".join(keys)
-
-    sql = f"""
-    COPY (
-      SELECT * EXCLUDE(_fn)
-      FROM (
-        SELECT *, filename AS _fn
-        FROM read_parquet('{shard_glob}', filename=true)
-      )
-      QUALIFY row_number() OVER (PARTITION BY {partition} ORDER BY _fn) = 1
-    ) TO '{final_out}' (FORMAT PARQUET, COMPRESSION 'snappy')
-    """
-    con = duckdb.connect()
-    try:
-        con.execute(f"PRAGMA memory_limit='{memory_limit}'")
-        con.execute(f"PRAGMA threads={threads}")
-        con.execute(f"PRAGMA temp_directory='{tmp_dir_s}'")
-        con.execute(sql)
-        n = con.execute(f"SELECT count(*) FROM read_parquet('{final_out}')").fetchone()[0]
-    finally:
-        con.close()
-    return int(n)
-
-
 def _dedup_safely(df: pd.DataFrame, subset: list[str]) -> pd.DataFrame:
     """drop_duplicates without hitting pyarrow's 2 GiB single-malloc limit.
 
@@ -300,130 +317,181 @@ def _dedup_safely(df: pd.DataFrame, subset: list[str]) -> pd.DataFrame:
     return out
 
 
+def _states_extras_frame(states_hub_input: pd.DataFrame,
+                         load_dt: datetime) -> pd.DataFrame:
+    """icao24 projection from raw_states bronze folded into hub_aircraft.
+
+    Preserves the multi-source contract from build_hub_aircraft: flightlist
+    rows win (rec_src='opensky_zenodo'), state-vector rows fill the gaps
+    with rec_src='opensky_s3'. The compaction pass passes this frame LAST
+    into the union so _dedup_safely(keep='first') keeps the flightlist
+    rec_src tag whenever both sources observed the same icao24.
+    """
+    if states_hub_input.empty:
+        return pd.DataFrame(columns=["hk_aircraft", "icao24", "load_dt", "rec_src"])
+    extra = states_hub_input.copy()
+    extra["icao24"] = extra["icao24"].astype("string").str.strip().str.upper()
+    extra = extra.dropna(subset=["icao24"]).drop_duplicates(subset=["icao24"])
+    extra["hk_aircraft"] = hash_series(extra["icao24"])
+    extra["load_dt"] = load_dt
+    extra["rec_src"] = "opensky_s3"
+    return extra[["hk_aircraft", "icao24", "load_dt", "rec_src"]]
+
+
+# T-09 will replace this with etl4/vault/compact.py (reads new ym only,
+# unions with existing monolith, writes back atomically). Until then, we
+# compact in-process per ym: read whatever monolith exists, union with the
+# per-month frames collected so far, dedup on business key, atomic rewrite.
+def _compact_small_hub(name: str, new_frames: list[pd.DataFrame],
+                       out_dir: Path) -> int:
+    existing_path = out_dir / name / "part.parquet"
+    frames: list[pd.DataFrame] = []
+    if existing_path.exists():
+        frames.append(pd.read_parquet(existing_path))
+    frames.extend(f for f in new_frames if not f.empty)
+    if not frames:
+        return _atomic_write_monolith(pd.DataFrame(), name, out_dir)
+    stacked = pd.concat(frames, ignore_index=True)
+    keys = _FINAL_DEDUP[name]
+    stacked = _dedup_safely(stacked, keys).reset_index(drop=True)
+    return _atomic_write_monolith(stacked, name, out_dir)
+
+
+def _partition_done(table: str, ym: str, out_dir: Path) -> bool:
+    """A (table, ym) is considered already-processed when both the
+    deterministic part.parquet and the _DONE sentinel exist beside it."""
+    ym_dir = out_dir / table / ("ym=" + ym)
+    return (ym_dir / "_DONE").exists() and (ym_dir / "part.parquet").exists()
+
+
+def _write_done(table: str, ym: str, out_dir: Path, load_dt: datetime) -> None:
+    sentinel = out_dir / table / ("ym=" + ym) / "_DONE"
+    sentinel.write_text(f"load_dt={load_dt.isoformat()}\n")
+
+
 def _chunked_flightlist_vault(flightlist_dir: Path, states_hub_input: pd.DataFrame,
-                              out_dir: Path, load_dt: datetime) -> dict[str, int]:
-    """Spill each per-file builder output to a parquet shard, then dedupe
-    per table. Nothing accumulates in Python memory across files, so the
-    peak RSS is bounded by one file's working set (~500 MB raw flightlist)
-    plus the single table being finalized at the end. This replaces the
-    earlier in-RAM accumulator approach, which grew with the input and hit
-    Windows commit/fragmentation limits around 10/48 files (segfault in
-    pyarrow's native allocator).
+                              out_dir: Path, load_dt: datetime,
+                              dsn: str = DSN_DEFAULT) -> dict[str, int]:
+    """Per-ym build: one bronze flightlist file maps to one month.
+
+    Flow:
+      1. watermark.get('vault', 'hub_flight') -> last_ym (None on first run).
+      2. For each bronze file sorted by filename:
+         a. ym = ym_from_filename; skip None (not a flightlist); skip
+            ym <= last_ym; otherwise read the file.
+         b. Build 7 tables. Write the 4 partitioned tables as
+            ym=YYYY-MM/part.parquet via vault_io.write_partition; drop _DONE
+            sentinels once each part lands.
+         c. Union the 3 small-hub frames into the existing monolith, dedup
+            on the business key, rewrite atomically. States extras fold in
+            on the final month (last-in-first-seen keeps zenodo rows).
+         d. Advance pipeline_watermarks for all 4 partitioned tables in one
+            transaction. Commit, so the next crash recovers from the last
+            fully-processed ym.
+
+    The former shard+DuckDB dedup pass is removed: each bronze file is one
+    month, so cross-file dedup is unnecessary. Per-month dedup happens
+    inside each builder (drop_duplicates on business keys).
     """
     files = _flightlist_files(flightlist_dir)
-    shard_root = out_dir / "_shards"
-    # Shards from an earlier interrupted run are reused: any file whose 7
-    # per-table shards are all present is skipped. A fresh run can be forced
-    # by deleting the shard_root directory before invoking build_raw_vault.
-
     counts: dict[str, int] = {k: 0 for k in _FINAL_DEDUP}
-    if not files and states_hub_input.empty:
-        for k in _FINAL_DEDUP:
-            _write(pd.DataFrame(), k, out_dir)
-        return counts
 
-    builders = {
+    last_ym = watermark.get("vault", "hub_flight", dsn=dsn)
+    if last_ym is not None:
+        print(f"  resuming from watermark: last_ym={last_ym}", flush=True)
+    else:
+        print("  no vault watermark; processing every bronze month", flush=True)
+
+    builders_partitioned = {
+        "hub_flight":           lambda fl: build_hub_flight(fl, load_dt),
+        "link_flight_aircraft": lambda fl: build_link_flight_aircraft(fl, load_dt),
+        "link_flight_route":    lambda fl: build_link_flight_route(fl, load_dt),
+        "sat_flight_summary":   lambda fl: build_sat_flight_summary(fl, load_dt),
+    }
+    builders_small = {
+        # hub_aircraft draws only from the flightlist's icao24 column here; the
+        # states_hub_input extras are folded in on the final month below.
         "hub_aircraft":          lambda fl: build_hub_aircraft(fl, pd.DataFrame(), load_dt),
         "hub_airport":           lambda fl: build_hub_airport(fl, load_dt),
-        "hub_flight":            lambda fl: build_hub_flight(fl, load_dt),
-        "link_flight_aircraft":  lambda fl: build_link_flight_aircraft(fl, load_dt),
-        "link_flight_route":     lambda fl: build_link_flight_route(fl, load_dt),
         "sat_aircraft_identity": lambda fl: build_sat_aircraft_identity(fl, load_dt),
-        "sat_flight_summary":    lambda fl: build_sat_flight_summary(fl, load_dt),
     }
-    for t in builders:
-        (shard_root / t).mkdir(parents=True, exist_ok=True)
 
-    for i, f in enumerate(files, 1):
-        shard_paths = {t: shard_root / t / f"part-{i:03d}.parquet" for t in builders}
-        if all(p.exists() for p in shard_paths.values()):
-            if i % 5 == 0 or i == len(files):
-                print(f"  resumed {i}/{len(files)} files from existing shards",
+    file_yms: list[tuple[Path, str]] = []
+    for f in files:
+        ym = vault_io.ym_from_filename(f.name)
+        if ym is None:
+            print(f"  skipping {f.name}: no ym match", flush=True)
+            continue
+        if last_ym is not None and ym <= last_ym:
+            continue
+        file_yms.append((f, ym))
+
+    if not file_yms:
+        if not states_hub_input.empty:
+            print("  no new flightlist months, folding states extras only ...",
+                  flush=True)
+            extras = _states_extras_frame(states_hub_input, load_dt)
+            if not extras.empty:
+                _compact_small_hub("hub_aircraft", [extras], out_dir)
+        for k in _FINAL_DEDUP:
+            counts[k] = vault_io.row_count(k, root=out_dir)
+        print("  no new flightlist months to process", flush=True)
+        return counts
+
+    print(f"  will process {len(file_yms)} new month(s): "
+          f"{file_yms[0][1]} .. {file_yms[-1][1]}", flush=True)
+
+    final_ym_index = len(file_yms) - 1
+    for idx, (f, ym) in enumerate(file_yms):
+        print(f"  [{idx + 1}/{len(file_yms)}] ym={ym} <- {f.name}", flush=True)
+
+        skip_mask = [_partition_done(t, ym, out_dir) for t in PARTITIONED_TABLES]
+        fl: pd.DataFrame | None = None
+        if not all(skip_mask):
+            fl = pd.read_parquet(f)
+
+        for t in PARTITIONED_TABLES:
+            if _partition_done(t, ym, out_dir):
+                print(f"    {t}/ym={ym}: resumed (part.parquet + _DONE)",
                       flush=True)
-            continue
-        # Partial shard set (prior crash mid-file): wipe partials so the file
-        # is rebuilt atomically.
-        for p in shard_paths.values():
-            p.unlink(missing_ok=True)
-        fl = pd.read_parquet(f)
-        for t, builder in builders.items():
-            frame = builder(fl)
-            # Per-file dedup on the business key keeps shards small and speeds
-            # up the final pass. Full cross-file dedup still happens below.
-            frame = _dedup_safely(frame, _FINAL_DEDUP[t]).reset_index(drop=True)
-            frame.to_parquet(shard_paths[t], index=False)
+                continue
+            frame = builders_partitioned[t](fl)
+            frame = frame.reset_index(drop=True)
+            # Keep the partition key inside the file body so pure-file reads
+            # (CLAUDE.md section 7) retain it. See architecture finding #4.
+            frame["ym"] = pd.Series([ym] * len(frame), dtype="string")
+            vault_io.write_partition(frame, t, ym, out_dir=out_dir)
+            _write_done(t, ym, out_dir, load_dt)
+            print(f"    {t}/ym={ym}: {len(frame):,}", flush=True)
             del frame
-        del fl
-        gc.collect()
-        if i % 5 == 0 or i == len(files):
-            print(f"  streamed {i}/{len(files)} files, shards spilled",
-                  flush=True)
 
-    # Fold state-vector icao24s into hub_aircraft before DuckDB sees the shards,
-    # so the multi-source hub contract from build_hub_aircraft is preserved.
-    # Name the extras file so it sorts AFTER every `part-NNN.parquet` shard; the
-    # finalize dedup orders by filename, and the pandas path's first-file-seen
-    # contract maps to "numbered shards win; extras fill only the gaps".
-    hub_aircraft_shard_dir = shard_root / "hub_aircraft"
-    extras_path = hub_aircraft_shard_dir / "zzz_extras.parquet"
-    if not states_hub_input.empty and not extras_path.exists():
-        extra = states_hub_input.copy()
-        extra["icao24"] = extra["icao24"].astype("string").str.strip().str.upper()
-        extra = extra.dropna(subset=["icao24"]).drop_duplicates(subset=["icao24"])
-        extra["hk_aircraft"] = hash_series(extra["icao24"])
-        extra["load_dt"] = load_dt
-        extra["rec_src"] = "opensky_s3"
-        hub_aircraft_shard_dir.mkdir(parents=True, exist_ok=True)
-        extra[["hk_aircraft", "icao24", "load_dt", "rec_src"]].to_parquet(
-            extras_path, index=False,
-        )
-        del extra
-        gc.collect()
-
-    print("  finalizing shards -> one part.parquet per table (DuckDB stream) ...",
-          flush=True)
-    duckdb_tmp = out_dir / "_duckdb_tmp"
-    for t, keys in _FINAL_DEDUP.items():
-        table_shard_dir = shard_root / t
-        final_path = out_dir / t / "part.parquet"
-        sentinel   = out_dir / t / "_DONE"
-        # Resume gate: a _DONE sentinel beside part.parquet means a prior run
-        # finalized this table successfully. The old gate ("shard dir missing")
-        # was unreliable because the streaming phase above re-creates shard
-        # dirs at startup, so it never fired even when the final was good.
-        if sentinel.exists() and final_path.exists():
-            counts[t] = int(duckdb.sql(
-                f"SELECT count(*) FROM read_parquet('"
-                f"{str(final_path).replace(chr(92), '/')}')"
-            ).fetchone()[0])
-            print(f"    {t}: {counts[t]:,} (resumed from _DONE sentinel)",
-                  flush=True)
-            if table_shard_dir.exists():
-                shutil.rmtree(table_shard_dir)
-            continue
-
-        shards = sorted(table_shard_dir.glob("*.parquet")) if table_shard_dir.exists() else []
-        if not shards:
-            _write(pd.DataFrame(), t, out_dir)
-            counts[t] = 0
-        else:
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            counts[t] = _duckdb_dedup_shards(
-                table_shard_dir, final_path, keys, duckdb_tmp,
+        new_small_frames: dict[str, list[pd.DataFrame]] = {
+            t: [] for t in NON_PARTITIONED_TABLES
+        }
+        if fl is not None:
+            for t in NON_PARTITIONED_TABLES:
+                new_small_frames[t].append(builders_small[t](fl))
+        if idx == final_ym_index and not states_hub_input.empty:
+            new_small_frames["hub_aircraft"].append(
+                _states_extras_frame(states_hub_input, load_dt)
             )
-        print(f"    {t}: {counts[t]:,}", flush=True)
 
-        sentinel.write_text(f"load_dt={load_dt.isoformat()}\n")
-        # Free this table's shards now that the final parquet + sentinel are
-        # on disk. Keeps peak disk bounded during the finalize pass.
-        if table_shard_dir.exists():
-            shutil.rmtree(table_shard_dir)
+        for t in NON_PARTITIONED_TABLES:
+            n = _compact_small_hub(t, new_small_frames[t], out_dir)
+            print(f"    {t} compacted: {n:,}", flush=True)
+
+        with psycopg.connect(dsn) as conn:
+            for t in PARTITIONED_TABLES:
+                rc = vault_io.row_count(t, ym_filter=ym, root=out_dir)
+                watermark.set("vault", t, ym, rc, conn)
+            conn.commit()
+
+        if fl is not None:
+            del fl
         gc.collect()
 
-    if duckdb_tmp.exists():
-        shutil.rmtree(duckdb_tmp, ignore_errors=True)
-    if shard_root.exists():
-        shutil.rmtree(shard_root)
+    for k in _FINAL_DEDUP:
+        counts[k] = vault_io.row_count(k, root=out_dir)
     return counts
 
 

@@ -243,7 +243,7 @@ def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rm, "prepare_silver", fake_prepare_silver)
     monkeypatch.setattr(rm, "_worker", fake_worker)
-    monkeypatch.setattr(rm, "_load", lambda p: pd.DataFrame(
+    monkeypatch.setattr(rm, "_load", lambda p, **_kw: pd.DataFrame(
         {"icao24": ["a"], "time": [0], "lat": [0.0], "lon": [0.0]}))
     monkeypatch.setattr(rm, "MATRIX_CSV", csv_path)
     # Sink is orthogonal to this test's invariant (matrix.csv crash-safety);
@@ -257,6 +257,10 @@ def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
         "run_matrix.py", "--bronze", str(tmp_path),
         "--methods", "time_gap", "kinematic", "--profiles", "N0",
         "--workers", "1",
+        "--source", "synthetic",  # T-20 added --ym validation: synthetic path
+                                   # auto-defaults to SYN-002A sentinel per
+                                   # architecture 2.3; s3|zenodo|rest would
+                                   # require an explicit --ym kwarg.
     ])
     with pytest.raises(RuntimeError):
         rm.main()

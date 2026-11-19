@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import re
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -37,6 +38,7 @@ import pandas as pd
 
 from etl4.bench.run_experiment import prepare_silver, reconstruct_from_silver
 from etl4.sink.postgres import write_run
+from etl4.vault import watermark
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -47,6 +49,10 @@ SYNTHETIC_TRUTH_DIR = ROOT / "etl4" / "data" / "reference" / "synthetic_truth"
 
 METHODS = ["time_gap", "kinematic", "kinematic_smoothing"]
 NOISE_PROFILES = ["N0", "N1", "N2", "N3"]
+
+REAL_SOURCES = ("s3", "zenodo", "rest")
+SYNTHETIC_YM_DEFAULT = "SYN-002A"  # DDL backfill literal, architecture section 2.3
+_YM_CALENDAR_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 
 
 def _derive_synthetic_truth(bronze_path: Path) -> Path | None:
@@ -70,10 +76,25 @@ def _derive_synthetic_truth(bronze_path: Path) -> Path | None:
     return SYNTHETIC_TRUTH_DIR / f"{dates.pop()}.parquet"
 
 
-def _load(path: Path) -> pd.DataFrame:
+def _load(path: Path, ym: str | None = None) -> pd.DataFrame:
+    """Load bronze parquet(s) under ``path``. If ``ym`` is a calendar
+    YYYY-MM and the tree has ``date=`` subdirectories, restrict the read
+    to files under ``date={ym}-*``. Synthetic bronze is typically flat and
+    uses the SYN sentinel; no filter is applied in that case.
+    """
     if path.is_file():
         return pd.read_parquet(path)
-    files = sorted(path.rglob("*.parquet"))
+    if ym and _YM_CALENDAR_RE.match(ym) and any(path.glob("date=*")):
+        files = sorted(path.glob(f"date={ym}-*/**/*.parquet"))
+        if not files:
+            raise SystemExit(
+                f"error: no parquet under {path} for ym={ym} "
+                f"(looked for date={ym}-*)"
+            )
+    else:
+        files = sorted(path.rglob("*.parquet"))
+    if not files:
+        raise SystemExit(f"error: no parquet under {path}")
     return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
 
 
@@ -96,15 +117,38 @@ def _worker(args: tuple) -> dict:
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--bronze", required=True)
+    # --bronze is validated manually below so --ym errors surface first for
+    # real sources (argparse required= would fire ahead of our ym check).
+    p.add_argument("--bronze")
     p.add_argument("--truth",  default=None)
     p.add_argument("--source", default="zenodo",
                    choices=["synthetic", "rest", "zenodo", "s3"])
+    p.add_argument("--ym", default=None,
+                   help="Partition month YYYY-MM; required when "
+                        "--source is s3|zenodo|rest. Synthetic defaults "
+                        "to SYN-002A (architecture section 2.3).")
     p.add_argument("--profiles", nargs="+", default=NOISE_PROFILES)
     p.add_argument("--methods",  nargs="+", default=METHODS)
     p.add_argument("--workers",  type=int, default=4,
                    help="parallel workers for pass 2 reconstruction")
     a = p.parse_args()
+
+    # Source-driven ym validation. Real sources must provide a calendar
+    # YYYY-MM; synthetic uses the SYN-<seed_hex> sentinel. This check runs
+    # BEFORE --bronze validation so operators see the actionable error.
+    if a.source in REAL_SOURCES:
+        if not a.ym:
+            p.error(f"--ym required when --source is one of "
+                    f"{'|'.join(REAL_SOURCES)}")
+        if not _YM_CALENDAR_RE.match(a.ym):
+            p.error(f"--ym must be YYYY-MM for --source={a.source}; "
+                    f"got {a.ym!r}")
+    elif a.source == "synthetic":
+        if a.ym is None:
+            a.ym = SYNTHETIC_YM_DEFAULT
+
+    if not a.bronze:
+        p.error("--bronze required")
 
     if a.truth is None and a.source == "synthetic":
         derived = _derive_synthetic_truth(Path(a.bronze))
@@ -119,9 +163,9 @@ def main():
             print(f"WARNING: auto-derived --truth path missing: {derived}; "
                   "proceeding without truth frame", flush=True)
 
-    bronze = _load(Path(a.bronze))
+    bronze = _load(Path(a.bronze), ym=a.ym)
     rows_in = int(len(bronze))
-    print(f"loaded {rows_in:,} bronze rows", flush=True)
+    print(f"loaded {rows_in:,} bronze rows  ym={a.ym}", flush=True)
 
     # ---- Pass 1: silver cache, one write per noise profile ----
     print(f"\n[pass 1] prepare silver for {len(a.profiles)} noise profile(s)",
@@ -166,16 +210,21 @@ def main():
     t2 = time.perf_counter()
 
     rows = []
+    run_ids: list[int | None] = []
 
     def _record(m: dict):
         """Write Postgres run + append matrix.csv row."""
-        run_id = write_run({
-            **m,
-            "source":  a.source,
-            "method":  m["method"],
-            "noise":   m["noise"],
-            "rows_in": rows_in,
-        })
+        run_id = write_run(
+            {
+                **m,
+                "source":  a.source,
+                "method":  m["method"],
+                "noise":   m["noise"],
+                "rows_in": rows_in,
+            },
+            ym=a.ym,
+        )
+        run_ids.append(run_id)
         if run_id:
             print(f"    [postgres run_id={run_id}]", flush=True)
         def _r(key, digits):
@@ -221,9 +270,45 @@ def main():
 
     print(f"[pass 2] done in {time.perf_counter() - t2:.1f}s", flush=True)
 
+    _advance_matrix_watermark(a.ym, run_ids)
+
     df = pd.DataFrame(rows).sort_values(["noise", "method"]).reset_index(drop=True)
     print(f"\nwrote {MATRIX_CSV.relative_to(ROOT)}\n")
     print(df.to_string(index=False))
+
+
+def _advance_matrix_watermark(ym: str, run_ids: list) -> None:
+    """Advance ('matrix', 'pipeline_runs') for calendar-month ym only.
+
+    The DDL CHECK on ``pipeline_watermarks.last_ym`` rejects the synthetic
+    SYN-<seed_hex> sentinel by design (architecture section 2.3, DDL
+    comment at create_tables.sql line 137). Synthetic cells therefore skip
+    the watermark write entirely -- the matrix watermark only tracks real
+    calendar partitions. Also skip if the Postgres sink was unreachable
+    (any None in run_ids) so a dev run without the DB does not advance a
+    watermark for cells that never landed.
+    """
+    if not _YM_CALENDAR_RE.match(ym or ""):
+        print(f"  [matrix watermark: skipped for ym={ym} "
+              f"(synthetic sentinel; non-calendar)]", flush=True)
+        return
+    if not run_ids or any(rid is None for rid in run_ids):
+        print("  [matrix watermark: skipped (sink unreachable or no cells)]",
+              flush=True)
+        return
+    import psycopg
+    with psycopg.connect(watermark.DSN_DEFAULT, connect_timeout=3) as conn:
+        current = watermark.get("matrix", "pipeline_runs")
+        if current is not None and _YM_CALENDAR_RE.match(current) \
+                and ym < current:
+            print(f"  [matrix watermark: ym={ym} < current={current}; "
+                  f"skipping to preserve high-water]", flush=True)
+            return
+        watermark.set("matrix", "pipeline_runs", ym,
+                      len(run_ids), conn)
+        conn.commit()
+    print(f"  [matrix watermark advanced: ('matrix', 'pipeline_runs') "
+          f"-> ym={ym}, row_count={len(run_ids)}]", flush=True)
 
 
 if __name__ == "__main__":
