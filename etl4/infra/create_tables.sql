@@ -203,3 +203,30 @@ BEGIN
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_ym ON pipeline_runs(ym);
+
+-- IMPR-01 T-23: ym-grouped projection over fact_experiment_result. Mirrors
+-- v_pareto_frontier pattern (one CREATE OR REPLACE VIEW, read-only). The
+-- underlying `last_ym` column is added by run_e2e.py::stage_eval_mart;
+-- guarded so this file is idempotent even on a fresh DB where
+-- stage_eval_mart has not yet run (same latent dependency as
+-- v_pareto_frontier -> fact_experiment_result; see architecture.md R9).
+-- `source = source` keeps count(*) null-safe without a second column name.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'fact_experiment_result'
+           AND column_name = 'last_ym'
+    ) THEN
+        CREATE OR REPLACE VIEW v_eval_mart_ym AS
+        SELECT last_ym AS ym,
+               source,
+               count(*) FILTER (WHERE source = source) AS cells,
+               MAX(wall_secs) AS slowest_wall_s,
+               AVG(rmse_m) FILTER (WHERE rmse_m IS NOT NULL) AS mean_rmse_m,
+               AVG(seg_f1) FILTER (WHERE seg_f1 IS NOT NULL) AS mean_seg_f1
+          FROM fact_experiment_result
+         GROUP BY last_ym, source
+         ORDER BY last_ym, source;
+    END IF;
+END $$;

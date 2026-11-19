@@ -1,0 +1,153 @@
+{
+  "task_id": "T-23",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR5",
+  "title": "Idempotent stage_eval_mart + v_eval_mart_ym DDL",
+  "owner": "developer-backend",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "high",
+  "objective": "Make etl4/run_e2e.py::stage_eval_mart idempotent. Reuse the existing IMPR-10 (ADR 2026-11-18) 18-column pivot shape and extend it with MAX(ym) AS last_ym (19 cols total). Watermark advance ('eval_mart','fact_experiment_result') runs in the same transaction as the COPY so a crash cannot leave the registry disagreeing with the mart. Also append CREATE OR REPLACE VIEW v_eval_mart_ym to etl4/infra/create_tables.sql for convenient (ym, source) dashboards.",
+  "depends_on": ["T-20"],
+  "unblocks": ["T-24 (data-engineer review of PR5)"],
+  "files_changed": [
+    {
+      "path": "etl4/run_e2e.py",
+      "change": "edit",
+      "lines_added": 56,
+      "lines_removed": 25,
+      "summary": "stage_eval_mart: (a) CTE latest now selects pipeline_runs.ym; (b) outer SELECT adds MAX(l.ym) AS last_ym (pass-through aggregate - DISTINCT ON produces one row per cell); (c) DDL grows last_ym TEXT, DROP VIEW block drops v_eval_mart_ym + v_pareto_frontier in order; (d) view_ddl appends CREATE OR REPLACE VIEW v_eval_mart_ym matching the shape appended to create_tables.sql; (e) single psycopg transaction (autocommit=False) covers DROP/CREATE/COPY/watermark.set/view (re)creates so the watermark write and the layer write are atomic; (f) max_ym filtered to calendar YYYY-MM via _YM_CALENDAR_RE before watermark.set - SYN-* fails the CHECK regex and sorts after '2099-12' lexicographically which would both raise CheckViolation and hide calendar progress; (g) watermark tag printed in the OK line for operator visibility; (h) no stage ordering change - stage_eval_mart still runs last in STAGES."
+    },
+    {
+      "path": "etl4/infra/create_tables.sql",
+      "change": "edit",
+      "lines_added": 25,
+      "lines_removed": 0,
+      "summary": "Appended v_eval_mart_ym DDL at the tail (after pipeline_runs.ym block). Guarded via DO $$ IF EXISTS (information_schema.columns ...) $$ so applying on a fresh DB where stage_eval_mart has not yet created fact_experiment_result.last_ym does not raise (mirrors architecture.md R9 - v_pareto_frontier has the same latent dependency, intentionally left intact in this task). View shape: ym (aliased from last_ym), source, cells (count(*) FILTER (WHERE source = source)), slowest_wall_s (MAX(wall_secs)), mean_rmse_m (AVG FILTER NOT NULL), mean_seg_f1 (AVG FILTER NOT NULL). GROUP BY last_ym, source ORDER BY last_ym, source."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t23_eval_mart_smoke.py",
+      "change": "new",
+      "lines_added": 160,
+      "lines_removed": 0,
+      "summary": "Live-Postgres smoke covering 6 ACs: stage runs, last_ym column present, view 6-col shape, view cardinality == count(DISTINCT (last_ym, source)), watermark row present with calendar ym and row_count matching mart, second invocation idempotent (fer/pareto/vem counts unchanged, updated_at strictly advances). Self-balancing assertions (before-vs-after) rather than hard-coded counts."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-23.json",
+      "change": "new",
+      "lines_added": 1,
+      "lines_removed": 0
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "statement": "Syntax OK on run_e2e.py + create_tables.sql applies cleanly twice",
+      "status": "PASS",
+      "evidence": "python -c 'import ast; ast.parse(open(etl4/run_e2e.py).read()); print(syntax OK)' -> 'syntax OK' (exit=0). docker exec -i etl4-postgres psql -U etl4 -d etl4 -v ON_ERROR_STOP=1 < etl4/infra/create_tables.sql: first apply EXIT1=0, second apply EXIT2=0. DO $$ block for v_eval_mart_ym runs 'DO' on both applies without error."
+    },
+    {
+      "id": "AC-2",
+      "statement": "python -c 'from etl4.run_e2e import stage_eval_mart; stage_eval_mart()' exits 0; fact_experiment_result now has last_ym column",
+      "status": "PASS",
+      "evidence": "First invocation stdout: 'eval_mart: ok  rows=25  watermark=eval_mart/2026-11  elapsed=0.6s'. docker exec etl4-postgres psql ... '\\d fact_experiment_result' lists last_ym TEXT as the 19th column (18 pre-existing IMPR-10 cols + last_ym)."
+    },
+    {
+      "id": "AC-3",
+      "statement": "v_eval_mart_ym present: '\\d v_eval_mart_ym' shows the 6 columns",
+      "status": "PASS",
+      "evidence": "psql \\d v_eval_mart_ym columns in order: ym (text), source (text), cells (bigint), slowest_wall_s (double precision), mean_rmse_m (double precision), mean_seg_f1 (double precision). Exactly 6 columns."
+    },
+    {
+      "id": "AC-4",
+      "statement": "SELECT * FROM v_eval_mart_ym returns one row per (ym, source) combination",
+      "status": "PASS",
+      "evidence": "psql SELECT * FROM v_eval_mart_ym returned 5 rows: (2022-06, s3), (2026-11, s3), (2026-11, zenodo), (SYN-002A, synthetic), (SYN-TEST, synthetic). Smoke AC-4 asserts count(*) == count(DISTINCT (last_ym, source)) and passed: 'AC-4 OK  v_eval_mart_ym rows=5 == distinct (ym, source) pairs'."
+    },
+    {
+      "id": "AC-5",
+      "statement": "Watermark advance: SELECT * FROM pipeline_watermarks WHERE layer='eval_mart' shows a row",
+      "status": "PASS",
+      "evidence": "psql SELECT: layer=eval_mart table_name=fact_experiment_result last_ym=2026-11 row_count=25 updated_at=2026-11-19 20:43:48.297467+00. Smoke AC-5 asserts last_ym matches calendar regex and row_count == SELECT count(*) FROM fact_experiment_result; passed."
+    },
+    {
+      "id": "AC-6",
+      "statement": "Second invocation of stage_eval_mart is idempotent (row counts unchanged; watermark updated_at advances)",
+      "status": "PASS",
+      "evidence": "BEFORE: updated_at=2026-11-19 20:43:48.297467+00 fer_count=25 pareto=12 vem=5. AFTER: updated_at=2026-11-19 20:44:24.089404+00 fer_count=25 pareto=12 vem=5. UPDATED_AT_ADVANCES: YES. Smoke AC-6 asserts all four and passed: 'AC-6 OK  second invocation idempotent (fer=25 pareto=12 vem=5; updated_at advanced)'."
+    },
+    {
+      "id": "AC-7",
+      "statement": "pytest etl4/tests/ -q still 92/0/0",
+      "status": "PASS",
+      "evidence": "'92 passed in 8.22s' after all changes (run twice; first before DDL apply, once more after smoke)."
+    }
+  ],
+  "commands_run": [
+    {
+      "cmd": "python -c \"import ast; ast.parse(open('etl4/run_e2e.py').read()); print('syntax OK')\"",
+      "exit": 0,
+      "stdout": "syntax OK"
+    },
+    {
+      "cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 -v ON_ERROR_STOP=1 < etl4/infra/create_tables.sql (twice)",
+      "exit": 0,
+      "note": "EXIT1=0 EXIT2=0; tails show CREATE VIEW + DO on both applies; NOTICE lines for existing relations as expected"
+    },
+    {
+      "cmd": "python -c \"from etl4.run_e2e import stage_eval_mart; stage_eval_mart()\"",
+      "exit": 0,
+      "stdout": "eval_mart: ok  rows=25  watermark=eval_mart/2026-11  elapsed=0.6s"
+    },
+    {
+      "cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c \"\\d fact_experiment_result\"",
+      "exit": 0,
+      "note": "Lists 19 columns; last_ym TEXT at the tail"
+    },
+    {
+      "cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c \"\\d v_eval_mart_ym\"",
+      "exit": 0,
+      "note": "6 columns: ym, source, cells, slowest_wall_s, mean_rmse_m, mean_seg_f1"
+    },
+    {
+      "cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c \"SELECT * FROM v_eval_mart_ym;\"",
+      "exit": 0,
+      "note": "5 rows, one per (ym, source) tuple"
+    },
+    {
+      "cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c \"SELECT * FROM pipeline_watermarks WHERE layer='eval_mart';\"",
+      "exit": 0,
+      "note": "eval_mart/fact_experiment_result last_ym=2026-11 row_count=25"
+    },
+    {
+      "cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t23_eval_mart_smoke.py",
+      "exit": 0,
+      "stdout": "AC-1 OK ... AC-2 OK ... AC-3 OK ... AC-4 OK (5 rows) ... AC-5 OK (eval_mart/2026-11, 25) ... AC-6 OK (idempotent, updated_at advanced) ... T23_SMOKE OK"
+    },
+    {
+      "cmd": "pytest etl4/tests/ -q",
+      "exit": 0,
+      "note": "92 passed in 8.22s (final run post-smoke)"
+    }
+  ],
+  "integration_points": {
+    "reads": "pipeline_runs (now including ym), eval_results (metrics for pivot), information_schema.columns (DO block guard for v_eval_mart_ym)",
+    "writes": "fact_experiment_result (19-col rewrite each run), v_pareto_frontier (CREATE OR REPLACE), v_eval_mart_ym (CREATE OR REPLACE; also created idempotently by stage_schema when fact_experiment_result.last_ym exists), pipeline_watermarks ('eval_mart','fact_experiment_result', calendar max_ym, len(df)), data/gold/marts/fact_experiment_result/part.parquet",
+    "callers_fixed_in_this_task": [
+      "stage_eval_mart second invocation no longer DROPs v_eval_mart_ym with DependentObjectsStillExist (new view would otherwise block DROP TABLE on the second run - the same bug ADR 2026-11-18 fixed for v_pareto_frontier)"
+    ]
+  },
+  "contract_deviations": [
+    "ADR 2026-11-18 fixes fact_experiment_result at 18 columns. This task adds last_ym (19). Flagged for a follow-up ADR entry per architecture.md section 9.3 ('fact_experiment_result as table vs view - explicit partition-stage ADR after T-23'). Did NOT edit etl4/docs/decisions.md - it is outside the file list for this task.",
+    "Task spec listed v_eval_mart_ym with 'SELECT ym, source, ...'. The stored column is last_ym (per 'Extend fact_experiment_result DDL to include last_ym TEXT'); view aliases last_ym AS ym so the output schema matches AC-3 '6 columns' verbatim (first column named 'ym'). GROUP BY last_ym - works fine in PG with the output alias.",
+    "watermark row_count argument interpreted as the total mart row count (len(df)) since fact_experiment_result is not ym-partitioned (one row per (source, method, noise) cell, MAX(ym) across the pivoted months). Matches the 'advisory total' semantics documented in watermark.py."
+  ],
+  "risks": [
+    "Pre-existing R9 widened: create_tables.sql now has two views (v_pareto_frontier, v_eval_mart_ym) that depend on fact_experiment_result. stage_schema on a fresh DB where stage_eval_mart has never run: v_pareto_frontier still fails (pre-existing), v_eval_mart_ym is guarded by DO block and skipped silently. Not fixed in this task; the architecture explicitly leaves R9 for a separate PR.",
+    "max_ym watermark is the max calendar ym across all pivoted cells, not per-cell. Operators reading the watermark see 'latest month any cell was measured from' which is approximately the full matrix horizon. If a specific (source, method, noise) cell lags behind another, the watermark does not surface that - the per-run last_ym column on fact_experiment_result does. v_eval_mart_ym exposes the per-(ym, source) view for ym-level dashboards.",
+    "pd.read_sql(..., psycopg_conn) emits a pandas UserWarning about SQLAlchemy connectable. Pre-existing behavior (not introduced by this task); non-fatal, does not affect correctness. A follow-up could switch to cur.execute + cur.fetchall + pd.DataFrame or an SQLAlchemy engine, but that's out of scope for T-23."
+  ],
+  "notes": "Design choices: (a) MAX(l.ym) not grouped: DISTINCT ON picks one row per cell, so each GROUP BY tuple contains exactly one l.ym value - MAX is a pass-through aggregate that keeps last_ym describing the SAME run as run_id (e.g. s3/time_gap/N0 has runs 108 (2022-06) and 21 (2026-11); latest by started_at is 21, so last_ym=2026-11). (b) Single transaction via default autocommit=False ensures the watermark advance and the COPY commit atomically; in previous autocommit=True path, a crash between COPY and watermark would leave the registry stale. (c) v_eval_mart_ym definition is identical in run_e2e.py and create_tables.sql so CREATE OR REPLACE from either side never trips 'cannot change name/type of view column'. (d) DO block guard in create_tables.sql uses information_schema.columns (not pg_attribute) for standard SQL portability. (e) Smoke is self-balancing (before-vs-after assertions) so it passes regardless of how many pipeline_runs rows the DB has at the time; only requires at least one row for AC-4 cardinality >= 1.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-20T00:00:00Z"
+}

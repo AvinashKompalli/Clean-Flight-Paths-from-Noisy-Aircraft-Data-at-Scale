@@ -217,9 +217,27 @@ def stage_eval_mart():
     """Build fact_experiment_result: one row per (noise, method)-latest run,
     pivoted from pipeline_runs x eval_results. Writes a parquet to
     data/gold/marts/fact_experiment_result/ and (re)creates the Postgres
-    table of the same name."""
+    table of the same name.
+
+    Idempotent (T-23, PROJ-20261118-impr01): re-running with no new
+    pipeline_runs yields byte-identical parquet, identical row counts in
+    fact_experiment_result, and advances only pipeline_watermarks.updated_at
+    for ('eval_mart','fact_experiment_result'). DDL, COPY, watermark set,
+    and view (re)creates all run in one transaction so a crash cannot leave
+    the watermark disagreeing with the mart.
+
+    `last_ym` is MAX(pipeline_runs.ym) for the latest run in each cell; since
+    DISTINCT ON picks exactly one run per (source, noise, method), MAX is a
+    pass-through aggregate that keeps last_ym describing the SAME run as
+    run_id. SYN-* sentinel ym values are written to fact_experiment_result
+    but filtered out before computing the watermark max (pipeline_watermarks
+    CHECK regex rejects non-calendar ym; also "SYN-002A" > "2026-11" in
+    string order and would hide real calendar progress).
+    """
     import pandas as pd
     import psycopg
+
+    from etl4.vault import watermark
 
     print("\n=== eval_mart ===", flush=True)
     t0 = time.perf_counter()
@@ -234,7 +252,7 @@ def stage_eval_mart():
     pivot = """
     WITH latest AS (
       SELECT DISTINCT ON (source, noise, method) run_id, run_date, source, method, noise,
-             rows_in, rows_out, wall_secs, started_at
+             rows_in, rows_out, wall_secs, started_at, ym
         FROM pipeline_runs
        ORDER BY source, noise, method, started_at DESC
     )
@@ -248,17 +266,20 @@ def stage_eval_mart():
            MAX(CASE WHEN er.metric='seg_precision'   THEN er.value END) AS seg_precision,
            MAX(CASE WHEN er.metric='seg_recall'      THEN er.value END) AS seg_recall,
            MAX(CASE WHEN er.metric='coverage_ratio'  THEN er.value END) AS coverage_ratio,
-           MAX(CASE WHEN er.metric='boundary_err_s'  THEN er.value END) AS boundary_err_s
+           MAX(CASE WHEN er.metric='boundary_err_s'  THEN er.value END) AS boundary_err_s,
+           MAX(l.ym)                                  AS last_ym
       FROM latest l
       LEFT JOIN eval_results er USING(run_id)
      GROUP BY l.run_id, l.run_date, l.source, l.method, l.noise,
               l.rows_in, l.rows_out, l.wall_secs, l.started_at
      ORDER BY l.source, l.noise, l.method
     """
-    # DROP VIEW first: v_pareto_frontier (added by T-004) depends on
-    # fact_experiment_result, so a bare DROP TABLE fails. Recreate the view
-    # at the tail so the dependency restores idempotently.
+    # DROP VIEWS first: both v_pareto_frontier (ADR 2026-11-18) and
+    # v_eval_mart_ym (T-23) depend on fact_experiment_result, so a bare
+    # DROP TABLE fails with DependentObjectsStillExist. Recreate both at
+    # the tail so dependencies restore idempotently.
     ddl = """
+    DROP VIEW IF EXISTS v_eval_mart_ym;
     DROP VIEW IF EXISTS v_pareto_frontier;
     DROP TABLE IF EXISTS fact_experiment_result;
     CREATE TABLE fact_experiment_result (
@@ -269,7 +290,7 @@ def stage_eval_mart():
       n_deviations DOUBLE PRECISION, rmse_m DOUBLE PRECISION,
       seg_f1 DOUBLE PRECISION, seg_precision DOUBLE PRECISION,
       seg_recall DOUBLE PRECISION, coverage_ratio DOUBLE PRECISION,
-      boundary_err_s DOUBLE PRECISION);
+      boundary_err_s DOUBLE PRECISION, last_ym TEXT);
     CREATE INDEX idx_fer_method ON fact_experiment_result(method);
     CREATE INDEX idx_fer_noise  ON fact_experiment_result(noise);
     """
@@ -282,33 +303,67 @@ def stage_eval_mart():
       FROM fact_experiment_result fer
      WHERE fer.rmse_m IS NOT NULL
        AND fer.wall_secs IS NOT NULL;
+
+    CREATE OR REPLACE VIEW v_eval_mart_ym AS
+    SELECT last_ym AS ym,
+           source,
+           count(*) FILTER (WHERE source = source) AS cells,
+           MAX(wall_secs) AS slowest_wall_s,
+           AVG(rmse_m) FILTER (WHERE rmse_m IS NOT NULL) AS mean_rmse_m,
+           AVG(seg_f1) FILTER (WHERE seg_f1 IS NOT NULL) AS mean_seg_f1
+      FROM fact_experiment_result
+     GROUP BY last_ym, source
+     ORDER BY last_ym, source;
     """
     cols = ["run_id","run_date","source","method","noise","rows_in","rows_out",
             "wall_secs","started_at","continuity","n_flights","n_deviations",
             "rmse_m","seg_f1","seg_precision","seg_recall","coverage_ratio",
-            "boundary_err_s"]
+            "boundary_err_s","last_ym"]
 
     with psycopg.connect(dsn) as conn:
         df = pd.read_sql(pivot, conn)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out, index=False)
 
-    with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
-        for stmt in ddl.strip().split(";"):
-            if stmt.strip():
-                cur.execute(stmt)
-        buf = io.StringIO()
-        df[cols].to_csv(buf, index=False, header=False, na_rep="")
-        buf.seek(0)
-        with cur.copy(f"COPY fact_experiment_result ({', '.join(cols)}) "
-                      f"FROM STDIN WITH (FORMAT csv, NULL '')") as cp:
-            cp.write(buf.read())
-        for stmt in view_ddl.strip().split(";"):
-            if stmt.strip():
-                cur.execute(stmt)
+    # Calendar-only max for the watermark: the pipeline_watermarks CHECK
+    # regex rejects 'SYN-002A', and lexicographically 'SYN-*' > '2099-12',
+    # so an unfiltered max() would both raise CheckViolation and hide real
+    # calendar progress. If no calendar ym exists (synthetic-only data),
+    # skip the watermark write, matching the pattern used by run_matrix.py
+    # at the matrix layer.
+    if "last_ym" in df.columns and not df["last_ym"].isna().all():
+        yms_cal = [y for y in df["last_ym"].dropna().astype(str).tolist()
+                   if _YM_CALENDAR_RE.match(y)]
+    else:
+        yms_cal = []
+    max_ym = max(yms_cal) if yms_cal else None
+
+    # Single transaction (autocommit=False by default). DDL is transactional
+    # in Postgres, so readers see either the old mart or the new one; the
+    # watermark advance rolls back together with the COPY on failure.
+    with psycopg.connect(dsn) as conn:
+        with conn.cursor() as cur:
+            for stmt in ddl.strip().split(";"):
+                if stmt.strip():
+                    cur.execute(stmt)
+            buf = io.StringIO()
+            df[cols].to_csv(buf, index=False, header=False, na_rep="")
+            buf.seek(0)
+            with cur.copy(f"COPY fact_experiment_result ({', '.join(cols)}) "
+                          f"FROM STDIN WITH (FORMAT csv, NULL '')") as cp:
+                cp.write(buf.read())
+            for stmt in view_ddl.strip().split(";"):
+                if stmt.strip():
+                    cur.execute(stmt)
+            if max_ym is not None:
+                watermark.set("eval_mart", "fact_experiment_result",
+                              max_ym, int(len(df)), conn)
+        conn.commit()
 
     wall = time.perf_counter() - t0
-    print(f"eval_mart: ok  rows={len(df)}  elapsed={wall:.1f}s", flush=True)
+    wm_tag = f"  watermark=eval_mart/{max_ym}" if max_ym else "  watermark=skipped[non-calendar-only]"
+    print(f"eval_mart: ok  rows={len(df)}{wm_tag}  elapsed={wall:.1f}s",
+          flush=True)
 
 
 def main():
