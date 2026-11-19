@@ -82,13 +82,34 @@ def _latest_per(df: pd.DataFrame, pk_cols: list[str]) -> pd.DataFrame:
 
     The satellite convention is to version by load_dt. Marts pull the current
     truth. Expresses `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY load_dt DESC) = 1`.
-    T-15 refines the sat_flight_summary variant to sort on (lastseen DESC,
-    load_dt DESC) for the cross-month reader rule.
     """
     if df.empty:
         return df
     return (df.sort_values("load_dt", ascending=False)
               .drop_duplicates(subset=pk_cols, keep="first")
+              .reset_index(drop=True))
+
+
+def _latest_sfs(sfs: pd.DataFrame) -> pd.DataFrame:
+    """Keep the latest row per `hk_flight` from sat_flight_summary.
+
+    Cross-month flights (departed month M, arrived M+1) split into two ym=
+    partitions with identical `hk_flight` but different `lastseen` / `load_dt`.
+    Pick the row with the later `lastseen` (= end-of-flight row), which carries
+    the full route info. Tie-break on `load_dt DESC` for the rare case of
+    identical `lastseen` (reruns of the same ingest). Reader-side implementation
+    of the ADR 2026-11-13 Risk 1 cross-month rule; `_latest_per`'s
+    `load_dt`-only sort is insufficient because the earlier-month partition
+    can carry a newer `load_dt` if that ingest was rerun.
+    """
+    if sfs.empty:
+        return sfs
+    return (sfs.sort_values(
+                ["hk_flight", "lastseen", "load_dt"],
+                ascending=[True, False, False],
+                kind="stable",
+              )
+              .drop_duplicates(subset=["hk_flight"], keep="first")
               .reset_index(drop=True))
 
 
@@ -132,7 +153,7 @@ def build_fact_flight_for_ym(ym: str, root: Path = SILVER_VAULT_ROOT) -> pd.Data
                             ["hk_flight", "hk_airport_origin", "hk_airport_destination"]],
                         on="hk_flight", how="left")
     if not sfs.empty:
-        summ = _latest_per(sfs, ["hk_flight"])[
+        summ = _latest_sfs(sfs)[
             ["hk_flight", "firstseen", "lastseen", "duration_s",
              "altitude_1", "altitude_2"]]
         out = out.merge(summ, on="hk_flight", how="left")
