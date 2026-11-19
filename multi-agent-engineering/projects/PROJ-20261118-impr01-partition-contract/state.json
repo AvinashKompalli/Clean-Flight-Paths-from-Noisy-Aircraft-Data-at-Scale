@@ -50,11 +50,20 @@
       "timestamp_utc": "2026-11-18T17:30:00Z",
       "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t19_sql_review.md",
       "notes": "T-19 SQL review of PR4 (T-17 postgres_sink.py staged UPSERT + T-18 sink/postgres.py write_run CTE). Sections A-E all PASS: TEMP lifetime + ON COMMIT DROP, DISTINCT ON tiebreakers byte-match architecture section 4.2/4.3, same-txn watermark through watermark.set(..., conn), CTE returns exactly one (run_id, created) row on both insert + conflict paths, transactional boundaries correct for both modules. No SQL defects. UNIQUE (ym, source, method, noise) from T-01B rules out multi-row conflict ambiguity. Unblocks T-20, T-22, T-27."
+    },
+    {
+      "gate": "VAULT_REVIEW_T08",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-19T00:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t11_vault_review.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261119T0000-data-engineer-to-orchestrator.json",
+      "notes": "T-11 review of T-08 _chunked_flightlist_vault rewrite (commit a008205). Sections A-E all PASS: determinism (modulo pre-existing load_dt non-determinism, out of T-08 scope), contract conformance (per-ym writes under ym=YYYY-MM/part.parquet via vault_io.write_partition, ym in file body, small-hub compaction preserves hub_aircraft keep=first precedence, ym_from_filename reused as single truth source), same-txn watermark (all 4 partitioned-table watermarks in one psycopg txn + conn.commit; read-gate on hub_flight only is safe because write is atomic), inline _compact_small_hub stub shape pinned for T-09 (10-item contract in review section E). All 4 flagged deviations re-triaged: #1 LOW/RESOLVED (smoke substitution stronger than literal), #2 NONE/CORRECT (design-aligned expansion), #3 LOW/DEFER to T-10 (R13 states_hub_input), #4 NONE/T-10 SCOPE (sat_state_observation). Unblocks T-09, T-10, T-14."
     }
   ],
   "open_defects": [],
   "change_requests": [],
-  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0906-data-engineer-to-orchestrator.json",
+  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261119T0000-data-engineer-to-orchestrator.json",
   "source_request": "User directive 2026-11-18: 'make the 3 suggestions I gave are also looked into and implemented if needed'. Orchestrator evaluation: IMPR-01 marked IMPLEMENT (strong PDF section 3 trace, design already committed as ADR, pure execution ahead). Full rationale in multi-agent-engineering/improvements_backlog.md IMPR-01 entry. Gate: PROJ-20261114-wi1-metrics must reach phase=DONE before this project advances past PENDING.",
   "standing_rules": [
     "CLAUDE.md at repo root is non-negotiable",
