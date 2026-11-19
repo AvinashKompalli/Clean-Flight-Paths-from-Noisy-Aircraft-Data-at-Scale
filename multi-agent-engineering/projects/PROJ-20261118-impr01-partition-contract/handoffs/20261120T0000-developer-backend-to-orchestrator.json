@@ -1,0 +1,81 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-12",
+  "from_agent": "developer-backend",
+  "to_agent": "orchestrator",
+  "current_phase": "IMPLEMENTATION",
+  "pr": "between PR3 merge and PR4 (one-shot migration; not a PR)",
+  "objective": "etl4/scripts/migrate_partition_ym.py - zero-reprocess rechunk of monolithic part.parquet into ym=YYYY-MM/part.parquet partitions per architecture section 6. Row-count equality gate; idempotent; streams via iter_batches; appends in-file ym column + _DONE sentinel to match T-08's writer; emits pipeline_watermarks at the end; prints Postgres-side SQL block.",
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md sections 6 and 5 (T-12 row)",
+    "etl4/vault/vault_io.py (T-05 -- write_partition, ym_from_date, ym_from_epoch, list_ym, row_count)",
+    "etl4/vault/watermark.py (T-02 -- get, set)",
+    "etl4/vault/compact.py (T-09 -- atomic tmp + os.replace pattern)",
+    "etl4/vault/raw_vault.py (T-08/T-10 -- ym column convention at line 543 and _DONE sentinel at line 448)"
+  ],
+  "status": "NEEDS_CHANGES",
+  "status_reason": "Architecture section 6 PARTITIONED_TABLES is unexecutable for 3 of 7 tables on the current data: link_flight_aircraft and link_flight_route have no 'day' column in their monolith, and sat_flight_summary's firstseen key disagrees with the T-08 writer's file-month key (~12.7k rows cross month boundaries, dry-run confirmed). The script delivered IS correct for the remaining 4 tables (hub_flight, sat_state_observation, fact_flight, fact_trajectory_enriched); it flags the 3 gaps with actionable diagnostics instead of silently migrating to a split-brain state. Data-engineer must decide on the key alignment for the 3 flagged tables before T-13 can approve a production migration pass.",
+  "acceptance_criteria": [
+    {"id": "AC-1 syntax + IMPORT", "status": "PASS", "note": "ast.parse OK on both files; from etl4.scripts.migrate_partition_ym import ... -> IMPORT OK"},
+    {"id": "AC-2 dry-run exits 0", "status": "PASS", "note": "Explicit exit-code capture BEFORE any pipe: `python -m etl4.scripts.migrate_partition_ym --dry-run --skip-watermark > /tmp/dry.out; echo SCRIPT_EXIT=$?` -> SCRIPT_EXIT=0. 4 tables plan; 3 tables schema_mismatch; WARN; SQL block printed; `find data -name '*.tmp'` and `find data -name 'ym=*'` both empty post-run."},
+    {"id": "AC-3 NULL-ym abort", "status": "PASS", "note": "Smoke case 3: fake sat_state_observation monolith with NULL time row -> exit=1, 'row-count mismatch' literal in detail, no ym dirs or tmp files left, monolith mtime preserved"},
+    {"id": "AC-4 idempotency", "status": "PASS", "note": "Smoke case 5 reruns case 4; 'already migrated' literal in detail; exit=0; st_mtime_ns of every ym=*/part.parquet preserved"},
+    {"id": "AC-5 smoke OK", "status": "PASS", "note": "python artifacts/t12_migration_smoke.py exits 0; 7 cases pass including in-file ym column + _DONE sentinel assertions (case 4) and unsupported-table exit-code policy (case 7)"},
+    {"id": "AC-6 pytest 92/0/0", "status": "PASS", "note": "92 passed in 8.20s"},
+    {"id": "AC-7 cp1252-safe", "status": "PASS", "note": "both files decode under cp1252; non-ASCII character count = 0 in each"}
+  ],
+  "evidence": {
+    "files_changed": [
+      {"path": "etl4/scripts/__init__.py", "change": "new", "lines_added": 0, "note": "empty package marker"},
+      {"path": "etl4/scripts/migrate_partition_ym.py", "change": "new", "lines_added": 691, "note": "wc -l; TABLE_SPECS (7, 3 with unsupported_reason) + migrate_one with monolith-schema + ym append + _DONE sentinel + per-month pq.ParquetWriter via tmp+os.replace + pd.factorize vectorized grouping + seed_watermarks + POSTGRES_SQL_BLOCK + main"},
+      {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t12_migration_smoke.py", "change": "new", "lines_added": 437, "note": "wc -l; 7-case subprocess-driven smoke; case 4 asserts in-file ym matches dir ym AND _DONE present; case 7 exercises unsupported real-run exit=1 vs dry-run exit=0"},
+      {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-12.json", "change": "new", "lines_added": 158}
+    ],
+    "commands_run": [
+      {"cmd": "python -c \"import ast; ast.parse(open('etl4/scripts/migrate_partition_ym.py').read()); ast.parse(open('.../t12_migration_smoke.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+      {"cmd": "python -c \"from etl4.scripts.migrate_partition_ym import main, TABLE_SPECS, migrate_one, seed_watermarks, MigrationResult, _write_done_sentinel; print('IMPORT OK')\"", "exit": 0, "stdout": "IMPORT OK"},
+      {"cmd": "python -m etl4.scripts.migrate_partition_ym --dry-run --skip-watermark > /tmp/dry.out; echo SCRIPT_EXIT=$?", "exit": 0, "note": "SCRIPT_EXIT=0; 4 tables plan; 3 schema_mismatch; WARN; SQL block printed; find data -name '*.tmp' empty; find data -name 'ym=*' empty"},
+      {"cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t12_migration_smoke.py", "exit": 0, "stdout_tail": "T12_SMOKE OK"},
+      {"cmd": "pytest etl4/tests/ -q", "exit": 0, "stdout_tail": "92 passed in 8.20s"}
+    ]
+  },
+  "integration_points": {
+    "reads": "data/silver/vault/<table>/part.parquet and data/gold/marts/<table>/part.parquet (monoliths); pq.ParquetFile.iter_batches(batch_size=1_000_000); vault_io.list_ym + pq.ParquetFile footer for idempotency and watermark seed; pq.read_schema for schema validation",
+    "writes": "<table>/ym=YYYY-MM/part.parquet (atomic via tmp+os.replace); <table>/ym=YYYY-MM/_DONE sentinel beside each partition (mirrors raw_vault._write_done so T-08/T-10 treat migrated partitions as resumed); pipeline_watermarks via etl4.vault.watermark.set (one commit per run; skipped when any selected table is schema_mismatch); POSTGRES_SQL_BLOCK to stdout (operator applies)",
+    "callers": [
+      "No new callers introduced. One-shot operator script. Downstream readers (marts.py, postgres_sink.py, run_e2e.py) already route through vault_io.read_table and transparently see the new ym tree."
+    ]
+  },
+  "contract_deviations": [
+    "ARCHITECTURE SECTION 6 GAP #1 (link_flight_aircraft, link_flight_route): neither monolith carries 'day'. Confirmed via pq.read_schema. Script reports schema_mismatch and continues. Options for data-engineer: (a) extend raw_vault.build_link_* to emit 'day', regenerate monolith, re-run; (b) join-against-hub_flight fallback (~3.5 GB memory, out of scope); (c) accept rebuild-from-bronze for these two tables (not zero-reprocess but acceptable for small link tables).",
+    "ARCHITECTURE SECTION 6 GAP #2 (sat_flight_summary): architecture maps firstseen -> ym_from_epoch, but (a) production dtype is timestamp[ns, tz=UTC] not int64, and (b) T-08 writes new sat_flight_summary partitions keyed by flightlist file month, not firstseen. Dry-run confirms ~12.7k rows cross month boundaries (6,152 into 2022-05 + 6,533 into 2022-11). Migration via firstseen would create split-brain partitioning.",
+    "schema_mismatch policy: dry-run WARN exit 0; real run FAIL exit 1 + skip watermark seeding. Advisor fix: a real default run that migrates 4 tables and skips 3 would seed a half-baked state; operator must pass --tables explicitly for the supported subset.",
+    "In-file ym column + _DONE sentinel: ADDED to migration output to match T-08's writer convention (raw_vault.py line 543 for ym, line 449 for _DONE). Without these, (a) read_table concat of migrated + T-08-shaped partitions would yield NaN ym for migrated rows, and (b) T-08 would rebuild over migrated partitions on the next run with a cleared watermark.",
+    "Monolith NOT deleted post-migration; operator deletes manually after verifying partition reads (vault_io.row_count == pre-migration footer)."
+  ],
+  "under_specification_resolved": [
+    "SQL block output: stdout only (POSTGRES_SQL_BLOCK module constant)",
+    "SQL timezone: SET LOCAL TIME ZONE 'UTC' inside BEGIN so to_char aligns with ym_from_epoch",
+    "pipeline_runs.ym constraint: NOT re-emitted (already in create_tables.sql T-01B)",
+    "schema_mismatch exit policy: dry-run WARN exit 0; real run FAIL exit 1",
+    "In-file ym column: appended per advisor correction; matches T-08",
+    "_DONE sentinel: dropped beside part.parquet per advisor correction; matches T-08",
+    "--skip-watermark flag: added for offline smokes"
+  ],
+  "test_status": "green (92/0/0 pytest + 7-case smoke T12_SMOKE OK + dry-run on real data SCRIPT_EXIT=0 with zero fs change). seed_watermarks path NOT exercised by the smoke (offline via --skip-watermark); covered by inspection against t10_sat_smoke's live-DB pattern.",
+  "unblocks": [
+    "T-13 (data-engineer migration review) -- script is review-ready; the 3 flagged gaps are the discussion items"
+  ],
+  "risks_known_limits": [
+    "3 tables unmigratable until data-engineer closes the schema / key gap (link_flight_aircraft, link_flight_route, sat_flight_summary). SAFE PATH for operator: skip those three until resolved.",
+    "Memory footprint during real migration: one 1M-row batch in memory per table pass; peak RSS bounded.",
+    "Watermark seed skipped if Postgres unreachable; data on disk still migrated; operator re-runs seed when DB is back.",
+    "seed_watermarks path not covered by the smoke (offline-only). Follow-up could add a live-DB case using t10's snapshot/restore pattern.",
+    "Monolith preserved post-migration; operator deletes after verifying partition reads.",
+    "Orphan tmp files from a killed process: `.part.parquet.<pid>.tmp` naming makes them tractable to clean."
+  ],
+  "next_action": "data-engineer T-13 review focused on: (a) resolution for the 3 schema/key gaps; (b) confirmation of the in-file ym + _DONE sentinel convention; (c) acceptance of the exit-code policy for schema_mismatch.",
+  "operator_monolith_delete_cue": "After the operator runs `python -m etl4.scripts.migrate_partition_ym --tables hub_flight,sat_state_observation,fact_flight,fact_trajectory_enriched` AND confirms `vault_io.row_count(name)` equals the pre-migration monolith row count for every migrated table (step 4 of T-12.json operator_runbook). Not before. For link_flight_aircraft / link_flight_route / sat_flight_summary: do NOT delete their monoliths until the schema/key gap is resolved -- they are the only remaining copy of those rows.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-20T00:00:00Z"
+}
