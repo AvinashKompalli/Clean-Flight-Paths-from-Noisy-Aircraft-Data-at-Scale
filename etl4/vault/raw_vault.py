@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import gc
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -338,23 +339,10 @@ def _states_extras_frame(states_hub_input: pd.DataFrame,
     return extra[["hk_aircraft", "icao24", "load_dt", "rec_src"]]
 
 
-# T-09 will replace this with etl4/vault/compact.py (reads new ym only,
-# unions with existing monolith, writes back atomically). Until then, we
-# compact in-process per ym: read whatever monolith exists, union with the
-# per-month frames collected so far, dedup on business key, atomic rewrite.
 def _compact_small_hub(name: str, new_frames: list[pd.DataFrame],
                        out_dir: Path) -> int:
-    existing_path = out_dir / name / "part.parquet"
-    frames: list[pd.DataFrame] = []
-    if existing_path.exists():
-        frames.append(pd.read_parquet(existing_path))
-    frames.extend(f for f in new_frames if not f.empty)
-    if not frames:
-        return _atomic_write_monolith(pd.DataFrame(), name, out_dir)
-    stacked = pd.concat(frames, ignore_index=True)
-    keys = _FINAL_DEDUP[name]
-    stacked = _dedup_safely(stacked, keys).reset_index(drop=True)
-    return _atomic_write_monolith(stacked, name, out_dir)
+    from etl4.vault.compact import compact_small_hub
+    return compact_small_hub(name, new_frames, out_dir)
 
 
 def _partition_done(table: str, ym: str, out_dir: Path) -> bool:
@@ -362,6 +350,102 @@ def _partition_done(table: str, ym: str, out_dir: Path) -> bool:
     deterministic part.parquet and the _DONE sentinel exist beside it."""
     ym_dir = out_dir / table / ("ym=" + ym)
     return (ym_dir / "_DONE").exists() and (ym_dir / "part.parquet").exists()
+
+
+def _group_state_files_by_ym(states_dir: Path,
+                             last_ym: str | None) -> dict[str, list[Path]]:
+    """Group raw_states bronze files by path-derived ym; drop ym <= last_ym.
+
+    R13 fix: paths carry month in their ``date=YYYY-MM-DD`` segment, so we
+    can filter without reading the parquet. Verified against the live
+    bronze that path ym and epoch ym agree for every row inside the file.
+    The per-row epoch ym is still computed on read as the in-file column
+    so a future out-of-month row would fail the write-side assertion in
+    ``_build_sat_state_observation_per_ym`` loudly rather than overwriting
+    a prior month's partition.
+    """
+    out: dict[str, list[Path]] = defaultdict(list)
+    if not states_dir.exists():
+        return out
+    for f in sorted(states_dir.rglob("*.parquet")):
+        try:
+            ym = vault_io.extract_ym_from_path(f)
+        except ValueError:
+            continue
+        if last_ym is not None and ym <= last_ym:
+            continue
+        out[ym].append(f)
+    return out
+
+
+def _build_sat_state_observation_per_ym(states_dir: Path, out_dir: Path,
+                                        load_dt: datetime,
+                                        dsn: str = DSN_DEFAULT) -> int:
+    """Per-ym build of sat_state_observation from raw_states bronze (pandas).
+
+    R13 fix: only files under ``date=YYYY-MM-*`` with ym > watermark are
+    read. Each resulting partition lands at
+    ``<out_dir>/sat_state_observation/ym=YYYY-MM/part.parquet`` with a
+    ``_DONE`` sentinel; watermark advances per ym in its own txn.
+
+    The sat watermark key is a separate row from the four flightlist-vault
+    keys (different ym axes: flightlist month vs state-vector month) so
+    the per-ym commit cannot share the flightlist txn.
+    """
+    state_cols = ["icao24", "time", "lat", "lon", "baroaltitude",
+                  "velocity", "heading", "vertrate", "callsign", "onground"]
+
+    sat_last_ym = watermark.get("vault", "sat_state_observation", dsn=dsn)
+    if sat_last_ym is not None:
+        print(f"  sat_state_observation: resuming from watermark: "
+              f"last_ym={sat_last_ym}", flush=True)
+    else:
+        print("  sat_state_observation: no watermark; processing every "
+              "bronze month", flush=True)
+
+    files_by_ym = _group_state_files_by_ym(states_dir, sat_last_ym)
+    if not files_by_ym:
+        print("  sat_state_observation: no new months to process", flush=True)
+        return vault_io.row_count("sat_state_observation", root=out_dir)
+
+    for ym in sorted(files_by_ym):
+        if _partition_done("sat_state_observation", ym, out_dir):
+            print(f"    sat_state_observation/ym={ym}: resumed "
+                  f"(part.parquet + _DONE)", flush=True)
+            continue
+
+        frames = []
+        for f in files_by_ym[ym]:
+            try:
+                frames.append(pd.read_parquet(f, columns=state_cols))
+            except Exception as e:
+                print(f"    skipped {f.relative_to(ROOT)}: "
+                      f"{type(e).__name__}: {e}", flush=True)
+        if not frames:
+            continue
+        states = pd.concat(frames, ignore_index=True)
+        sat = build_sat_state_observation(states, load_dt)
+        sat = sat.reset_index(drop=True)
+        sat_ym = vault_io.ym_from_epoch(sat["time"])
+        uniq = set(sat_ym.dropna().unique())
+        if uniq and uniq != {ym}:
+            raise AssertionError(
+                "sat_state_observation/ym=%s: epoch-derived ym in file "
+                "disagrees with path ym: %s" % (ym, sorted(uniq))
+            )
+        sat["ym"] = sat_ym.astype("string")
+
+        vault_io.write_partition(sat, "sat_state_observation", ym, out_dir=out_dir)
+        _write_done("sat_state_observation", ym, out_dir, load_dt)
+        rc = vault_io.row_count("sat_state_observation", ym_filter=ym, root=out_dir)
+        with psycopg.connect(dsn) as conn:
+            watermark.set("vault", "sat_state_observation", ym, rc, conn)
+            conn.commit()
+        print(f"    sat_state_observation/ym={ym}: {rc:,}", flush=True)
+        del states, sat
+        gc.collect()
+
+    return vault_io.row_count("sat_state_observation", root=out_dir)
 
 
 def _write_done(table: str, ym: str, out_dir: Path, load_dt: datetime) -> None:
@@ -517,15 +601,20 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
     # pandas read_parquet(columns=...) is more tolerant of per-file schema
     # drift (e.g. mixed int64 vs dictionary types on ancillary columns like
     # `hour`, which pyarrow's dataset loader refuses to merge).
+    # R13 fix: filter the hub icao24 projection by the sat watermark so a
+    # rerun against the same bronze does not re-scan months already folded.
     states_hub_input = pd.DataFrame(columns=["icao24"])
     if include_states and states_dir.exists():
-        files = sorted(states_dir.rglob("*.parquet"))
+        sat_last_ym = watermark.get("vault", "sat_state_observation")
+        hub_files_by_ym = _group_state_files_by_ym(states_dir, sat_last_ym)
         frames = []
-        for f in files:
-            try:
-                frames.append(pd.read_parquet(f, columns=["icao24"]))
-            except Exception as e:
-                print(f"  skipped {f.relative_to(ROOT)}: {type(e).__name__}: {e}")
+        for ym in sorted(hub_files_by_ym):
+            for f in hub_files_by_ym[ym]:
+                try:
+                    frames.append(pd.read_parquet(f, columns=["icao24"]))
+                except Exception as e:
+                    print(f"  skipped {f.relative_to(ROOT)}: "
+                          f"{type(e).__name__}: {e}")
         if frames:
             states_hub_input = pd.concat(frames, ignore_index=True)
     print(f"  state-vector icao24 rows (hub input): {len(states_hub_input):,}")
@@ -542,24 +631,15 @@ def build_raw_vault(flightlist_dir: Path = FLIGHTLIST_BRONZE,
             out_dir=out_dir / "sat_state_observation",
         )
     elif include_states:
-        state_cols = ["icao24", "time", "lat", "lon", "baroaltitude",
-                      "velocity", "heading", "vertrate", "callsign", "onground"]
-        s_files = sorted(states_dir.rglob("*.parquet")) if states_dir.exists() else []
-        s_frames = []
-        for f in s_files:
-            try:
-                s_frames.append(pd.read_parquet(f, columns=state_cols))
-            except Exception as e:
-                print(f"  skipped {f.relative_to(ROOT)}: {type(e).__name__}: {e}")
-        states = pd.concat(s_frames, ignore_index=True) if s_frames else pd.DataFrame()
-        counts["sat_state_observation"] = _write(
-            build_sat_state_observation(states, load_dt),
-            "sat_state_observation", out_dir,
+        counts["sat_state_observation"] = _build_sat_state_observation_per_ym(
+            states_dir, out_dir, load_dt,
         )
-        del states
     else:
-        counts["sat_state_observation"] = _write(
-            pd.DataFrame(), "sat_state_observation", out_dir,
+        # include_states=False: do NOT truncate the existing partitioned tree
+        # (pre-T-12 this was a 333M-row monolith; post-T-12 it is the
+        # authoritative ym=*/part.parquet set). Just report the current count.
+        counts["sat_state_observation"] = vault_io.row_count(
+            "sat_state_observation", root=out_dir,
         )
     print(f"  sat_aircraft_identity={counts['sat_aircraft_identity']:,}  "
           f"sat_flight_summary={counts['sat_flight_summary']:,}  "
