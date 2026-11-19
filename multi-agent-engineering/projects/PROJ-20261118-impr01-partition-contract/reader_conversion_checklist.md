@@ -39,7 +39,7 @@ Source-of-truth reader. Every call hits silver/vault; every write lands in gold/
 | 6 | L72 | `_read("link_flight_aircraft")` | `vault_io.read_table("link_flight_aircraft", ym_filter=ym_range)` | Partitioned. Same ym plumbing as hub_flight. |
 | 7 | L73 | `_read("link_flight_route")` | `vault_io.read_table("link_flight_route", ym_filter=ym_range)` | Partitioned. Cross-month reader rule (FR-15, T-15) implemented inside `_latest_sfs` after the read, not inside vault_io. |
 | 8 | L74 | `_read("sat_flight_summary")` | `vault_io.read_table("sat_flight_summary", ym_filter=ym_range)` | Partitioned. T-15's `(lastseen DESC, load_dt DESC)` sort runs on the result. |
-| 9 | L106 | `_read("sat_state_observation")` | `vault_io.read_table("sat_state_observation", ym_filter=ym_range, columns=STATE_COLS)` | Partitioned, 333M rows at current scale. Column pushdown MANDATORY (hits 15-column rows but only ~10 are consumed) to keep memory bounded; `STATE_COLS = ['hk_aircraft','icao24','time','lat','lon','baroaltitude','velocity','heading','callsign']`. |
+| 9 | L106 | `_read("sat_state_observation")` | `vault_io.read_table("sat_state_observation", ym_filter=ym_range, columns=STATE_COLS)` | Partitioned, 333M rows at current scale. Column pushdown MANDATORY (hits 15-column rows but only ~10 are consumed) to keep memory bounded; `STATE_COLS = ['hk_aircraft','time','lat','lon','baroaltitude','velocity','heading','callsign']` (icao24 enriched downstream via hk_aircraft merge from dim_aircraft; sat_state_observation does not carry icao24 on disk). |
 
 Writer-side call sites (same file, L34-37 `_write`):
 

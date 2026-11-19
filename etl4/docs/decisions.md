@@ -205,3 +205,22 @@ Column list in `fact_experiment_result` grows from 14 to 18: `run_id, run_date, 
 
 **Risks**: The `source='s3'` filter removal means cells from different sources commingle in the same mart row set. Dashboards that need to compare must filter by `source` explicitly. Documented in dashboard 08's reviewer-explainer markdown panel.
 
+### 2026-11-20 - Cross-month flight reader rule in marts._latest_sfs (IMPR-01 T-15)
+
+**Context**: Under the IMPR-01 partition contract, `sat_flight_summary` is read per-ym inside `build_fact_flight_for_ym`. A flight that departs month M and arrives M+1 lands rows in BOTH `ym=M` and `ym=M+1` `sat_flight_summary` partitions with identical `hk_flight`, different `(lastseen, load_dt)`. ADR 2026-11-13 Risk 1 proposed a reader-side mitigation in `marts._latest_sfs`.
+
+**Decision**:
+- `marts._latest_sfs` orders by `(hk_flight ASC, lastseen DESC, load_dt DESC)` with stable sort + `drop_duplicates(keep='first')`. Implemented in T-15 commit `40f1fb4`.
+- The per-ym read scope means both cross-month rows never share a frame inside a single `build_fact_flight_for_ym` invocation. The reducer therefore only closes R1 when both rows co-occur (migration multi-ym reads, future global reducer).
+- Operationally R1 is closed by two downstream contracts:
+  (a) `postgres_sink` `INSERT ... ON CONFLICT (hk_flight) DO UPDATE SET lastseen=EXCLUDED.lastseen` - forward-chronological runs pick Feb over Jan at sink.
+  (b) Rewind contract: rewind of month M MUST rewind M+1 too when either month contains a cross-month flight; T-21 CLI help text and a SQL detection snippet should surface this.
+
+**Consequences**:
+- Running months in chronological order produces correct `fact_flight` at both parquet and Postgres layers.
+- A rewind of a single mid-range month without its neighbour will temporarily revert `lastseen`; a subsequent rebuild of M+1 restores it.
+
+**Open follow-up**: A globally-scoped post-build reducer across (M-1, M, M+1) ym_filter tuples would close the gap without relying on sink-side UPSERT. Deferred; not required for current scale.
+
+**Links**: T-15 task JSON risks_for_t16; architecture.md §9.1 R1 + §9.3 bullet 1; `t16_marts_review.md` §C.2.
+
