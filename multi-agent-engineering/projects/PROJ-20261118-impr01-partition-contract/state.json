@@ -59,11 +59,20 @@
       "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t11_vault_review.md",
       "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261119T0000-data-engineer-to-orchestrator.json",
       "notes": "T-11 review of T-08 _chunked_flightlist_vault rewrite (commit a008205). Sections A-E all PASS: determinism (modulo pre-existing load_dt non-determinism, out of T-08 scope), contract conformance (per-ym writes under ym=YYYY-MM/part.parquet via vault_io.write_partition, ym in file body, small-hub compaction preserves hub_aircraft keep=first precedence, ym_from_filename reused as single truth source), same-txn watermark (all 4 partitioned-table watermarks in one psycopg txn + conn.commit; read-gate on hub_flight only is safe because write is atomic), inline _compact_small_hub stub shape pinned for T-09 (10-item contract in review section E). All 4 flagged deviations re-triaged: #1 LOW/RESOLVED (smoke substitution stronger than literal), #2 NONE/CORRECT (design-aligned expansion), #3 LOW/DEFER to T-10 (R13 states_hub_input), #4 NONE/T-10 SCOPE (sat_state_observation). Unblocks T-09, T-10, T-14."
+    },
+    {
+      "gate": "MARTS_REVIEW_T14_T15",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-20T00:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t16_marts_review.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0000-data-engineer-to-orchestrator.json",
+      "notes": "T-16 review of T-14 (commit 8161cd4 marts.py per-ym rewrite) + T-15 (commit 40f1fb4 _latest_sfs cross-month reader rule). Sections A-F: A contract conformance PASS (per-ym build matches architecture 2.4/2.6; dim_* full-refresh; fact_* via vault_io.write_partition; ym column re-derived via ym_from_epoch matches partition name); B watermark txn safety PASS (both fact watermarks in one psycopg txn + conn.commit per ym; rollback on exception drops both; crash-safety audit clean for all 4 crash points); C _latest_sfs PASS as-written with MEDIUM gap flagged - per-ym read scope means Jan/Feb cross-month rows never share a frame; mitigation via postgres_sink UPSERT + rewind contract; follow-up ADR drafted in review section F; D _STATE_COLS correctly omits icao24 (verified against raw_vault.py and raw_vault_spark.py on-disk schemas; checklist section 1 row 9 was stale), icao24 dtype preserved via vault_io.read_table cast; E idempotency PASS (RUN 2 fact counts 0, st_mtime_ns unchanged, watermarks stable); F ADR entry wording recommended for orchestrator. Zero HIGH severity findings. Zero blockers for T-24 PR5 review or PR3 merge. Unblocks T-24."
     }
   ],
   "open_defects": [],
   "change_requests": [],
-  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261119T0000-data-engineer-to-orchestrator.json",
+  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0000-data-engineer-to-orchestrator.json",
   "source_request": "User directive 2026-11-18: 'make the 3 suggestions I gave are also looked into and implemented if needed'. Orchestrator evaluation: IMPR-01 marked IMPLEMENT (strong PDF section 3 trace, design already committed as ADR, pure execution ahead). Full rationale in multi-agent-engineering/improvements_backlog.md IMPR-01 entry. Gate: PROJ-20261114-wi1-metrics must reach phase=DONE before this project advances past PENDING.",
   "standing_rules": [
     "CLAUDE.md at repo root is non-negotiable",
