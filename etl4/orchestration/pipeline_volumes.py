@@ -18,6 +18,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import psycopg
 
+from etl4.vault import vault_io
+
 ROOT = Path(__file__).resolve().parents[2]
 DSN = os.getenv("POSTGRES_DSN",
                 "postgresql://etl4:change_me@localhost:5432/etl4")
@@ -67,13 +69,27 @@ POSTGRES_TARGETS = [
 ]
 
 
-def _scan_parquet_tree(path: Path) -> tuple[int, int, int]:
+def _scan_parquet_tree(
+    path: Path,
+    *,
+    name: str | None = None,
+    vault_root: Path | None = None,
+) -> tuple[int, int, int]:
     """Return (files, rows, bytes) summed from parquet footers under `path`.
-    Skips the _shards transient dirs and _DONE sentinels."""
+    Skips the _shards transient dirs and _DONE sentinels.
+
+    When `name` and `vault_root` are both supplied (silver_vault / gold_marts),
+    row counts route through `vault_io.row_count` so the dashboard respects
+    the partition contract (T-07 reader-conversion checklist). Bronze keeps
+    the direct pyarrow scan (bronze is out of vault_io's scope). File and
+    byte counts always come from the filesystem walk."""
     if not path.exists():
         return 0, 0, 0
     files = [f for f in path.rglob("*.parquet") if "_shards" not in f.parts]
-    rows  = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+    if name is not None and vault_root is not None:
+        rows = vault_io.row_count(name, root=vault_root)
+    else:
+        rows = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
     bytes_ = sum(f.stat().st_size for f in files)
     return len(files), rows, bytes_
 
@@ -109,10 +125,20 @@ def main() -> None:
             if stmt.strip():
                 cur.execute(stmt)
 
+        layer_roots = {
+            "silver_vault": vault_io.SILVER_VAULT_ROOT,
+            "gold_marts":   vault_io.MARTS_ROOT,
+        }
         total_rows = 0
         for layer, targets in PARQUET_TARGETS.items():
+            vault_root = layer_roots.get(layer)
             for name, path in targets.items():
-                files, rows, bytes_ = _scan_parquet_tree(path)
+                if vault_root is not None:
+                    files, rows, bytes_ = _scan_parquet_tree(
+                        path, name=name, vault_root=vault_root,
+                    )
+                else:
+                    files, rows, bytes_ = _scan_parquet_tree(path)
                 cur.execute(UPSERT, (layer, name, rows, bytes_, files))
                 total_rows += rows
                 print(f"  [{layer:<14}] {name:<30} files={files:<3} "
