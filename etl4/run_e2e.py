@@ -11,22 +11,26 @@ Stages, in order:
    5. vault        raw Data Vault 2.0 build
    6. marts        dim_aircraft, dim_airport, fact_flight, fact_trajectory_enriched
    7. qa           Great Expectations suites against vault/marts  (non-zero exit on failure)
-   8. sink         COPY marts into Postgres
+   8. sink         COPY marts into Postgres (per-ym, via --ym propagation)
    9. reconcile    row-count reconciliation bronze -> vault -> marts  (gates matrix)
   10. matrix       3-method x N-noise reconstruction matrix  (telemetry -> pipeline_runs + eval_results)
   11. eval_mart    fact_experiment_result mart (pivot of pipeline_runs x eval_results)
 
 Usage:
-  python etl4/run_e2e.py                               # everything, zenodo ingest
-  python etl4/run_e2e.py --skip infra schema          # resume mid-chain
-  python etl4/run_e2e.py --only matrix eval_mart      # just these two
-  python etl4/run_e2e.py --profiles N0 N1             # shorter matrix
-  python etl4/run_e2e.py --source live --live-limit 2000  # live REST stream instead
+  python etl4/run_e2e.py --ym 2022-06                  # everything for one month
+  python etl4/run_e2e.py --skip infra schema --ym 2022-06
+  python etl4/run_e2e.py --source synthetic --only matrix --methods time_gap
+  python etl4/run_e2e.py --source s3 --only sink --ym 2022-06
+  python etl4/run_e2e.py --source live --live-limit 2000 --only ingest  # legacy live REST stream
+
+--ym is required when --source is one of s3|zenodo|rest; synthetic defaults
+to SYN-002A per architecture.md section 2.3.
 """
 from __future__ import annotations
 
 import argparse
 import io
+import re
 import subprocess
 import sys
 import time
@@ -35,8 +39,107 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
+sys.path.insert(0, str(ROOT))
+
+from etl4.vault import vault_io, watermark
+
 STAGES = ["infra", "schema", "ingest", "bronze", "vault",
           "marts", "qa", "sink", "reconcile", "matrix", "eval_mart"]
+
+REAL_SOURCES = ("s3", "zenodo", "rest")
+MATRIX_SOURCES = ("s3", "zenodo", "rest", "synthetic")
+INGEST_SOURCES = ("zenodo", "live")
+
+VAULT_PARTITIONED_TABLES = ("hub_flight", "link_flight_aircraft",
+                            "link_flight_route", "sat_flight_summary")
+
+_YM_CALENDAR_RE = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
+
+
+def _months_between(lo: str, hi: str) -> set:
+    """Set of 'YYYY-MM' strings from lo to hi inclusive (calendar months).
+
+    Local to this module so the pre-flight check does not take a dependency
+    on etl4.orchestration.rewind (parallel sibling task T-21).
+    """
+    y0, m0 = int(lo[:4]), int(lo[5:7])
+    y1, m1 = int(hi[:4]), int(hi[5:7])
+    out = set()
+    y, m = y0, m0
+    while (y, m) <= (y1, m1):
+        out.add("%04d-%02d" % (y, m))
+        m += 1
+        if m == 13:
+            m = 1
+            y += 1
+    return out
+
+
+def check_watermark_vs_filesystem(root: Path = vault_io.SILVER_VAULT_ROOT) -> None:
+    """Abort on watermark-vs-filesystem drift for the 4 partitioned vault tables.
+
+    Flags three states:
+      1. Watermark row present but filesystem is empty -> sink/matrix would
+         re-skip already-committed months on disk that got scrubbed.
+      2. Filesystem has ym dirs but no watermark row -> next vault run would
+         bootstrap and reprocess every month.
+      3. Watermark present; filesystem has a non-contiguous range or extra
+         dirs past last_ym -> ADR 2026-11-13 Risk 16 (holes).
+
+    Calendar yms only (watermark DDL CHECK rejects SYN-*). Raises SystemExit
+    with a rewind hint when drift is detected.
+
+    Does NOT swallow OperationalError: Postgres being down pre-stage_infra
+    is a different failure mode. Caller orders the call after infra+schema
+    when those stages are in the run set.
+    """
+    try:
+        for table in VAULT_PARTITIONED_TABLES:
+            fs_yms_all = set(vault_io.list_ym(table, root=root))
+            fs_yms = {y for y in fs_yms_all if _YM_CALENDAR_RE.match(y)}
+            db_last = watermark.get("vault", table)
+
+            if db_last is None:
+                if fs_yms:
+                    raise SystemExit(
+                        "[run_e2e] watermark drift: table=%s has %d ym dirs "
+                        "on disk but no watermark row; run "
+                        "`python -m etl4.orchestration.rewind` to reconcile"
+                        % (table, len(fs_yms))
+                    )
+                continue
+
+            if not fs_yms:
+                raise SystemExit(
+                    "[run_e2e] watermark drift: table=%s has watermark "
+                    "last_ym=%s but zero ym dirs on disk; run "
+                    "`python -m etl4.orchestration.rewind --layer vault "
+                    "--from %s --to %s --yes` to reconcile"
+                    % (table, db_last, db_last, db_last)
+                )
+
+            expected = _months_between(min(fs_yms), db_last)
+            missing = expected - fs_yms
+            extra = fs_yms - expected
+            if missing or extra:
+                raise SystemExit(
+                    "[run_e2e] watermark drift on %s: "
+                    "missing=%s extra=%s; run "
+                    "`python -m etl4.orchestration.rewind` to reconcile"
+                    % (table, sorted(missing)[:5], sorted(extra)[:5])
+                )
+    except SystemExit:
+        raise
+    except Exception as e:
+        # psycopg.errors.UndefinedTable before stage_schema has run, or
+        # OperationalError before stage_infra. Caller is expected to order
+        # this check after those stages; surface the real error so the
+        # operator sees the failure mode and does not get a silent pass.
+        raise SystemExit(
+            "[run_e2e] pre-flight drift check failed: %s: %s; "
+            "ensure infra+schema ran first, or pass --skip-drift-check to bypass"
+            % (type(e).__name__, e)
+        ) from e
 
 
 def _run(name: str, cmd: list[str], shell: bool = False) -> float:
@@ -88,18 +191,26 @@ def stage_qa():
     _run("qa", [PY, "-m", "etl4.qa.validate"])
 
 
-def stage_sink():
-    _run("sink", [PY, "-m", "etl4.vault.postgres_sink"])
+def stage_sink(ym: str):
+    _run("sink", [PY, "-m", "etl4.vault.postgres_sink", "--ym", ym])
 
 
 def stage_reconcile():
     _run("reconcile", [PY, "-m", "etl4.qa.reconcile"])
 
 
-def stage_matrix(profiles: list[str], bronze: str):
-    _run("matrix", [PY, "etl4/bench/run_matrix.py",
-                    "--bronze", bronze, "--source", "zenodo",
-                    "--profiles", *profiles])
+def stage_matrix(source: str, profiles: list, methods: list | None,
+                 workers: int | None, bronze: str, ym: str | None):
+    cmd = [PY, "etl4/bench/run_matrix.py",
+           "--bronze", bronze, "--source", source,
+           "--profiles", *profiles]
+    if methods:
+        cmd += ["--methods", *methods]
+    if workers is not None:
+        cmd += ["--workers", str(workers)]
+    if ym is not None:
+        cmd += ["--ym", ym]
+    _run("matrix", cmd)
 
 
 def stage_eval_mart():
@@ -203,34 +314,89 @@ def stage_eval_mart():
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--source", default="zenodo", choices=["zenodo", "live"],
-                   help="zenodo (batch, primary) or live (REST stream, secondary)")
+    p.add_argument("--source", default="zenodo",
+                   choices=["zenodo", "live", "s3", "rest", "synthetic"],
+                   help="batch (zenodo|s3), live REST stream (live), REST-states "
+                        "replay (rest), or synthetic noise fixture (synthetic). "
+                        "Only zenodo|live are supported by stage_ingest; "
+                        "others require --only / --skip ingest.")
     p.add_argument("--live-limit", type=int, default=2000,
                    help="record count for --source live")
-    p.add_argument("--bronze", default="data/bronze/raw_states",
-                   help="bronze tree for the matrix stage")
+    p.add_argument("--bronze", default=None,
+                   help="bronze tree for the matrix stage; "
+                        "defaults to data/bronze/synthetic for --source synthetic, "
+                        "else data/bronze/raw_states")
+    p.add_argument("--ym", default=None,
+                   help="partition month YYYY-MM. Required when --source is one "
+                        "of s3|zenodo|rest, and when stage_sink is in the run set. "
+                        "Optional for synthetic (auto-defaults to SYN-002A).")
     p.add_argument("--profiles", nargs="+",
                    default=["N0", "N1", "N2", "N3"])
+    p.add_argument("--methods", nargs="+", default=None,
+                   help="methods to run in the matrix stage "
+                        "(default: all three)")
+    p.add_argument("--workers", type=int, default=None,
+                   help="parallel workers for the matrix stage")
     p.add_argument("--skip", nargs="+", default=[], choices=STAGES,
                    help="stages to skip")
     p.add_argument("--only", nargs="+", default=None, choices=STAGES,
                    help="run only these stages (overrides --skip)")
+    p.add_argument("--skip-drift-check", action="store_true",
+                   help="bypass the watermark-vs-filesystem pre-flight check")
     a = p.parse_args()
 
     run = set(a.only) if a.only else set(STAGES) - set(a.skip)
+
+    # Argparse-level validation BEFORE any DB / FS work so operators see the
+    # actionable error even when Postgres is down.
+    matrix_source = a.source if a.source in MATRIX_SOURCES else "zenodo"
+    if a.source in REAL_SOURCES and a.ym is None:
+        p.error("--ym required when --source is one of %s"
+                % "|".join(REAL_SOURCES))
+    if "matrix" in run and matrix_source in REAL_SOURCES and a.ym is None:
+        # stage_matrix forwards --source=live -> matrix_source=zenodo, which
+        # run_matrix would reject mid-run as "--ym required". Fail fast.
+        p.error("--ym required for stage_matrix when effective source is %s "
+                "(got --source=%s mapped to matrix_source=%s)"
+                % (matrix_source, a.source, matrix_source))
+    if "sink" in run and (a.ym is None or not _YM_CALENDAR_RE.match(a.ym or "")):
+        p.error("--ym YYYY-MM required for stage_sink "
+                "(postgres_sink rejects the SYN-* sentinel)")
+    if "ingest" in run and a.source not in INGEST_SOURCES:
+        p.error("stage_ingest only supports --source %s (got %s); "
+                "pass --skip ingest or --only ... to exclude it"
+                % ("|".join(INGEST_SOURCES), a.source))
+
+    # Resolve bronze default per source so --source synthetic does not feed
+    # real state parquet into the synthetic noise-truth path.
+    if a.bronze is None:
+        a.bronze = ("data/bronze/synthetic" if a.source == "synthetic"
+                    else "data/bronze/raw_states")
+
     print(f"[run_e2e] stages: {[s for s in STAGES if s in run]}", flush=True)
+    print(f"[run_e2e] source={a.source}  ym={a.ym}  bronze={a.bronze}", flush=True)
     t_all = time.perf_counter()
 
     if "infra"     in run: stage_infra()
     if "schema"    in run: stage_schema()
+
+    # Drift check runs AFTER infra+schema so a fresh machine does not crash
+    # against UndefinedTable / OperationalError. On --only skipping both,
+    # the caller is responsible for Postgres being reachable; the check
+    # surfaces the real error if not.
+    if not a.skip_drift_check:
+        check_watermark_vs_filesystem()
+
     if "ingest"    in run: stage_ingest(a.source, a.live_limit)
     if "bronze"    in run: stage_bronze()
     if "vault"     in run: stage_vault()
     if "marts"     in run: stage_marts()
     if "qa"        in run: stage_qa()
-    if "sink"      in run: stage_sink()
+    if "sink"      in run: stage_sink(a.ym)
     if "reconcile" in run: stage_reconcile()
-    if "matrix"    in run: stage_matrix(a.profiles, a.bronze)
+    if "matrix"    in run:
+        stage_matrix(matrix_source, a.profiles, a.methods, a.workers,
+                     a.bronze, a.ym)
     if "eval_mart" in run: stage_eval_mart()
 
     print(f"\n[run_e2e] all done in {time.perf_counter() - t_all:.1f}s", flush=True)
