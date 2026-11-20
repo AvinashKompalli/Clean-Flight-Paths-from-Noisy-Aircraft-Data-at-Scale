@@ -239,3 +239,27 @@ Column list in `fact_experiment_result` grows from 14 to 18: `run_id, run_date, 
 
 **Links**: commit 2129532 (T-23); `t24_pr5_review.md` §D + §F3; `architecture.md` §9.3 bullet 4.
 
+### 2026-11-20 - IMPR-01 T-13: FILE-MONTH as the single ym key for flightlist-derived vault tables
+
+**Context**: ADR 2026-11-13 and architecture.md §2.5 originally specified `ym_from_date(df.day)` for `hub_flight`, `link_*`, and `sat_flight_summary`. The T-08 implementation of `_chunked_flightlist_vault` (commit `a008205`, T-11 APPROVED 2026-11-19) writes `frame["ym"] = pd.Series([ym] * len(frame), dtype="string")` where `ym = ym_from_filename(f.name)` — i.e. FILE-MONTH. For production data as of 2026-11-20 these two keys agree on 99.72% of `sat_flight_summary` rows and 100% of link-table rows (which carry no `day`), but the migration script surfaced 12,685 cross-month `firstseen` rows where the keys disagree.
+
+**Decision**:
+1. FILE-MONTH (via `ym_from_filename(f.name)`) is the AUTHORITATIVE partition key for every flightlist-derived vault table: `hub_flight`, `link_flight_aircraft`, `link_flight_route`, `sat_flight_summary`.
+2. Architecture.md §2.5's "`ym_from_date(df.day)`" row is reinterpreted as "best-effort row-level key that MUST agree with file-month". A future violation (a bronze file containing rows with `day` in a neighbouring month) is a bronze upstream bug that must be fixed before T-08 writes the file; not a partitioning decision.
+3. The one-shot migration script (`etl4/scripts/migrate_partition_ym.py`) rebuilds `link_*` and `sat_flight_summary` from bronze via T-08 rather than stream-rechunking their monoliths. `hub_flight` is still stream-rechunked because its `day` column IS present in its monolith and has 100% row-level agreement with file-month at current data (verified by T-12 dry-run exit 0).
+
+**Consequences**:
+- Migration output byte-matches T-08's ongoing writes; rewind M followed by rebuild M produces the same partition bytes as the original migration.
+- `_latest_sfs` cross-month reader rule (ADR 2026-11-20 above) continues to close R1 via sink UPSERT + rewind M±1 contract; partition-key choice is orthogonal.
+- No code change in T-08 or in any committed reader; only the migration script's `TABLE_SPECS` and the operator runbook change.
+
+**Alternatives considered**:
+- Firstseen-based migration key for `sat_flight_summary` — rejected: creates permanent split-brain with T-08's file-month on 12,685 rows under rewind.
+- Add `day` column to link-table builders + regenerate monolith — rejected: dead column everywhere except migration; more code than bronze rebuild.
+- In-memory join of link monoliths against hub_flight to backfill `day` — rejected: 3.5 GB RSS, custom one-shot code path.
+
+**Risks**:
+- A future bronze file with cross-month `day` rows (today's count: 0 on hub_flight, 12,685 on sat_flight_summary but the firstseen-vs-day distinction removes the issue) would be hidden by file-month partitioning. Mitigation: documented as R1b in architecture.md §9.1.
+
+**Links**: T-12 commit `2145dbf`; T-13 review `t13_migration_review.md`; T-11 review approval; T-15 ADR (2026-11-20 cross-month flight reader rule above); architecture.md §6.3 + §6.4 (patches in `t13_migration_review.md` §4).
+

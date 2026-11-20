@@ -518,14 +518,28 @@ from etl4.vault.vault_io import ym_from_epoch, ym_from_date, write_partition
 ROOT = Path(__file__).resolve().parents[2]
 
 PARTITIONED_TABLES = {
-    # table_dir, ym_source_col, ym_helper
-    "silver/vault/hub_flight":            ("day",  ym_from_date),
-    "silver/vault/link_flight_aircraft":  ("day",  ym_from_date),
-    "silver/vault/link_flight_route":     ("day",  ym_from_date),
-    "silver/vault/sat_flight_summary":    ("firstseen", ym_from_epoch),
-    "silver/vault/sat_state_observation": ("time", ym_from_epoch),
-    "gold/marts/fact_flight":             ("day",  ym_from_date),
-    "gold/marts/fact_trajectory_enriched":("time", ym_from_epoch),
+    # key_source is the row-level column used by the migration helper.
+    # Four flightlist-derived vault tables are NOT in this dict (per T-13 2026-11-20):
+    #   - link_flight_aircraft, link_flight_route: no 'day' column in monolith (builders
+    #     at raw_vault.py L158-199 drop it); rebuild from bronze via T-08 after monolith delete.
+    #   - sat_flight_summary: 'firstseen' key disagrees with T-08 FILE-MONTH key for 12,685
+    #     cross-month rows; stream-migrating would create split-brain. Rebuild from bronze.
+    #   - hub_flight stays in this dict because its 'day' column IS present and 100% agrees
+    #     with file-month at current data (verified by T-12 dry-run exit 0).
+    #
+    # The remaining three are state/trajectory-derived (no file-month concept; time epoch
+    # is authoritative and matches Postgres to_char(to_timestamp(time), 'YYYY-MM')):
+    "silver/vault/hub_flight":             ("day",  ym_from_date),
+    "silver/vault/sat_state_observation":  ("time", ym_from_epoch),
+    "gold/marts/fact_flight":              ("day",  ym_from_date),
+    "gold/marts/fact_trajectory_enriched": ("time", ym_from_epoch),
+}
+# Tables that cannot be migrated via monolith rechunk and must be rebuilt
+# from bronze flightlist via T-08 raw_vault after monolith delete:
+REBUILD_FROM_BRONZE = {
+    "silver/vault/link_flight_aircraft",
+    "silver/vault/link_flight_route",
+    "silver/vault/sat_flight_summary",
 }
 
 def migrate_one(relpath: str, col: str, helper) -> dict:
@@ -677,6 +691,23 @@ Rationale:
 3. No UUID basenames.
 4. `write_to_dataset(..., partition_cols=["ym"], existing_data_behavior="overwrite_or_ignore")` is still fine in the migration helper because pq.write_table is driven per-group explicitly.
 
+### 6.3. In-file `ym` column + `_DONE` sentinel on migration output (BINDING, T-13 2026-11-20)
+
+Every migrated partition file carries `ym` as an in-row column of dtype `string`. This mirrors `etl4/vault/raw_vault.py` line 543 (T-08 writer convention). Without the in-file column, concurrent reads of migrated partitions + T-08-written partitions through `vault_io.read_table` would yield `NaN` for `ym` on migrated rows (Spark-shard broadcast join risk and `fact_trajectory_enriched.ym` backfill drift).
+
+Every migrated partition directory carries an `_DONE` sentinel file matching the `raw_vault._write_done` format: `load_dt=<ISO datetime>\n`. The migration may append `source=migrate_partition_ym\n` for provenance. `_partition_done` (T-08 line 529) tests existence only, so this is byte-safe. Without the sentinel, a subsequent T-08 run with a cleared watermark would rebuild over the migrated partition and double-write the month.
+
+### 6.4. Three flightlist-derived vault tables are rebuilt from bronze, not stream-rechunked (BINDING, T-13 2026-11-20)
+
+`link_flight_aircraft`, `link_flight_route`, and `sat_flight_summary` are not stream-migrated from their monoliths because:
+
+- Link monoliths have no row-level month column (builders at `raw_vault.py` L158-199 drop `day`).
+- `sat_flight_summary` monolith's `firstseen` key disagrees with T-08's FILE-MONTH key for 12,685 cross-month rows; any firstseen-based migration would create split-brain under rewind.
+
+Operator procedure: migrate the other 4 tables first; row-count-verify; delete those 4 monoliths; clear the 3 cleared-table watermarks; delete the 3 remaining monoliths; run `python -m etl4.vault.raw_vault` (or equivalent entrypoint) to rebuild the 3 tables per-month via T-08's `_partition_done`-gated loop. The migration is wall-cost dominated by the first step (`sat_state_observation` rechunk); the bronze rebuild of the 3 tables is minutes.
+
+Byte-equivalence with T-08: all four flightlist-derived vault tables (`hub_flight`, `link_*`, `sat_flight_summary`) land on partition keys consistent with T-08's committed `frame["ym"] = ym_from_filename(f.name)` writer. See ADR 2026-11-20 FILE-MONTH key rule in `etl4/docs/decisions.md`.
+
 ---
 
 ## 7. Rewind primitive outline
@@ -801,6 +832,7 @@ Risk: developer-backend becomes the single point of contention on PR2. Mitigatio
 | R2 | Small-hub uniqueness drift under `icao24` normalization change | `clean.py::project_raw` is the enforcement point (CLAUDE.md §2.6); `compact.py` dedups on `hk_aircraft`; drift surfaces as a visible row-count anomaly via `pipeline_watermarks.row_count` | T-09 |
 | R3 | ym extraction asymmetry (flightlist in-file `day` vs state in-path `date`) | Single ym helper module in `vault_io.py`; three functions, documented truth table in §2.5 | T-04 |
 | R4 | Watermark vs filesystem drift | `set(ym dirs)` vs contiguous `[min, last_ym]` range check in `run_e2e` pre-flight — **not** the ADR's count-vs-string check | T-22 |
+| R1b | `hub_flight` has a row with `day` in month M and lives in bronze file for month M+1 (currently 0 rows at scale; future risk) | LOW | Cross-check inside `migrate_one` for `hub_flight`: compare `day`-derived ym against bronze source filename once the migration is invoked; abort on mismatch | T-12 defensive check (follow-up) |
 
 ### 9.2. New risks from the code read
 

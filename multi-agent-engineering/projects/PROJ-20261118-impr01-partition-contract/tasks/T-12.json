@@ -4,13 +4,20 @@
   "pr": "between PR3 merge and PR4 (one-shot migration; not a PR)",
   "title": "etl4/scripts/migrate_partition_ym.py -- zero-reprocess monolith -> ym partitions",
   "owner": "developer-backend",
-  "status": "NEEDS_CHANGES",
+  "status": "APPROVED",
   "phase": "IMPLEMENTATION",
   "priority": "high",
   "objective": "Rechunk each existing <table>/part.parquet monolith into <table>/ym=YYYY-MM/part.parquet partitions via pyarrow streaming (iter_batches), per architecture section 6. Zero re-processing of upstream data. Row-count equality gate pre/post. Idempotent. Emit pipeline_watermarks rows at the end. Print Postgres-side migration SQL block to stdout; do NOT run it.",
   "status_reason": "Architecture section 6 PARTITIONED_TABLES is unexecutable for 3 of 7 tables on the current data: link_flight_aircraft and link_flight_route have no 'day' column in their monolith, and sat_flight_summary's firstseen key disagrees with the T-08 writer's file-month key (~12.7k rows cross month boundaries, dry-run confirmed). The script delivered IS correct for the 4 remaining tables (hub_flight, sat_state_observation, fact_flight, fact_trajectory_enriched) and flags the 3 gaps with actionable diagnostics instead of silently migrating to a split-brain state. Data-engineer needs to decide on the key alignment for the 3 flagged tables before T-13 can approve a production migration pass.",
-  "depends_on": ["T-02 (watermark, DONE)", "T-05 (vault_io.py, DONE)", "T-08 (per-ym build, DONE)", "T-09 (compact.py, DONE)"],
-  "unblocks": ["T-13 (data-engineer migration review)"],
+  "depends_on": [
+    "T-02 (watermark, DONE)",
+    "T-05 (vault_io.py, DONE)",
+    "T-08 (per-ym build, DONE)",
+    "T-09 (compact.py, DONE)"
+  ],
+  "unblocks": [
+    "T-13 (data-engineer migration review)"
+  ],
   "files_changed": [
     {
       "path": "etl4/scripts/__init__.py",
@@ -170,5 +177,9 @@
   },
   "exit_condition_for_monolith_delete": "When vault_io.row_count(name) == pre-migration pq.ParquetFile(<name>/part.parquet).metadata.num_rows for every migrated table (steps 4+5 of operator runbook). Not before. For the 3 unsupported tables: do NOT delete their monoliths until the schema / key gap is resolved; they are the only remaining copy of those rows.",
   "windows_cp1252_safe": true,
-  "timestamp_utc": "2026-11-20T00:00:00Z"
+  "timestamp_utc": "2026-11-20T00:00:00Z",
+  "approved_by": "data-engineer",
+  "approved_at_utc": "2026-11-20T07:00:00Z",
+  "approval_ref": "t13_migration_review.md",
+  "operator_runbook_supersede_ref": "t13_migration_review.md section 2"
 }
