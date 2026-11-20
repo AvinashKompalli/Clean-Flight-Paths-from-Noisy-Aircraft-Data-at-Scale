@@ -1,0 +1,89 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-13",
+  "from_agent": "data-engineer",
+  "to_agent": "orchestrator",
+  "current_phase": "IMPLEMENTATION",
+  "subject": "T-12 migration script review -- APPROVED with binding decisions on 3 schema gaps",
+  "objective": "Review etl4/scripts/migrate_partition_ym.py (T-12 commit 2145dbf). Resolve 3 architecture section 6 schema gaps developer-backend flagged. Produce operator runbook + architecture section 6 patch text + follow-up ADR text.",
+  "status": "APPROVED",
+  "deliverable": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t13_migration_review.md",
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md (sections 6, 2.5, 9.1)",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-12.json",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0000-developer-backend-to-orchestrator.json",
+    "etl4/scripts/migrate_partition_ym.py (691 lines)",
+    "etl4/vault/raw_vault.py lines 420-576 (T-08 _chunked_flightlist_vault + _write_done at 448; writer line 543)",
+    "etl4/vault/raw_vault.py lines 141-247 (build_hub_flight, build_link_flight_aircraft, build_link_flight_route, build_sat_flight_summary -- link builders confirmed drop day; sat_flight_summary confirmed keeps firstseen/lastseen only)",
+    "etl4/vault/vault_io.py (ym_from_filename, ym_from_epoch, ym_from_date; PARTITIONED_TABLES frozenset)",
+    "etl4/docs/decisions.md tail: 2026-11-20 T-15 Cross-month flight reader rule in marts._latest_sfs"
+  ],
+  "binding_decisions": {
+    "gap_1_link_tables": {
+      "verdict": "OPTION C - rebuild from flightlist bronze via T-08",
+      "rationale": "raw_vault.py L158-199 builders drop day; monoliths cannot carry day. Option A (extend builders to emit day + regenerate monolith) is dead-column-everywhere and more code. Option B (join against hub_flight) consumes 3.5 GB RSS and adds single-shot code path. Option C deletes link monoliths, clears their watermarks, runs standard T-08 incremental pass; T-08's _partition_done gate skips the already-migrated tables and only writes link partitions per month via ym_from_filename -- byte-identical to fresh-pipeline output. ~165M rows total; minutes per month.",
+      "downstream_day_dependency": "none. marts.build_fact_flight_for_ym joins link to hub_flight on hk_flight not day; sink/matrix never read day off link tables."
+    },
+    "gap_2_sat_flight_summary": {
+      "verdict": "FILE-MONTH key (Option B) via bronze rebuild (Option C)",
+      "rationale_1_primary_source": "raw_vault.py L543 (frame[ym] = pd.Series([ym] * len(frame), dtype='string') where ym = ym_from_filename(f.name)) confirms T-08 uses FILE-MONTH for all 4 partitioned flightlist-derived tables. T-11 APPROVED this writer on 2026-11-19. Dispatch's 'Option A matches T-08' is empirically wrong.",
+      "rationale_2_t15_adr": "etl4/docs/decisions.md 2026-11-20 T-15 ADR tail entry explicitly states per-ym read scope means cross-month rows never share a frame inside build_fact_flight_for_ym; reader rule closes R1 only on multi-ym reads or future global reducer; operationally R1 is closed by sink UPSERT + rewind M+/-1 contract. Partition key choice is orthogonal to T-15 closure. Dispatch's 'Option B breaks T-15' misreads the ADR.",
+      "rationale_3_split_brain": "Option A (firstseen migration key) would put 12,685 cross-month rows at firstseen-month (6,152 at ym=2022-05, 6,533 at ym=2022-11) while T-08's ongoing writer places them at file-month (ym=2022-06, ym=2022-12). Subsequent rewind+rebuild of 2022-06/2022-12 regenerates those 12,685 rows at file-month locations, leaving dead orphan rows at firstseen-month partitions. Permanent split-brain unless T-08 is also changed to firstseen -- which reopens T-08 and invalidates T-11 approval.",
+      "implementation": "sat_flight_summary monolith = 4,600,646 rows across 2 months; rebuild via T-08 bronze pass is < 1 minute. Operator path identical to Gap 1: delete monolith, clear watermark, run incremental T-08."
+    },
+    "gap_3_in_file_ym_and_done_sentinel": {
+      "verdict": "CONFIRMED - both additions are correct and binding; architecture section 6 is amended via patch text in review document section 4",
+      "rationale_in_file_ym": "architecture section 6.2 (committed) already states 'ym is retained in-file'; raw_vault.py L543 is the T-08 writer convention; without it, concurrent reads of migrated + T-08 partitions through vault_io.read_table would yield NaN for ym on migrated rows (Spark broadcast-join risk, fact_trajectory_enriched.ym backfill drift).",
+      "rationale_done_sentinel": "raw_vault.py L448 _write_done is the T-08 resume gate convention; L529 _partition_done checks for both part.parquet and _DONE. Without the sentinel, next T-08 run with cleared watermark would see part.parquet but no _DONE and either misread partition state or rebuild over the migrated partition, double-writing. Advisor caught this during T-12 implementation; dev-backend added it. Correct.",
+      "sentinel_format": "migration script writes 'load_dt=<iso>\\nsource=migrate_partition_ym\\n'; _partition_done tests existence only, so the extra provenance line is byte-safe."
+    }
+  },
+  "operator_runbook_summary": "Full runbook in t13_migration_review.md section 2. Key gates: (step 4) HARD GATE on vault_io.row_count == pre-migration footer for all 4 migrated tables BEFORE (step 5) monolith delete; (step 6) bronze rebuild of 3 flagged tables with watermark clear; (step 8) pre-rewind lock release only after step 7 row-count verification. Pre-rewind lock between steps 1 and 8 is MEDIUM severity operator-enforced constraint; rewind during the migration window would delete partitions the migration wrote and break the T-08 _partition_done skip optimization.",
+  "exit_code_policy_review": {
+    "dry_run_schema_mismatch": "WARN tag + exit 0 -- ACCEPT",
+    "dry_run_row_count_mismatch": "exit 1 -- ACCEPT",
+    "real_run_schema_mismatch": "FAIL + exit 1 + skip-watermark -- ACCEPT (advisor-caught half-baked-state risk)",
+    "real_run_row_count_mismatch": "exit 1 + tmp cleanup + monolith untouched -- ACCEPT"
+  },
+  "architecture_patch_target": {
+    "file": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md",
+    "patch_location": "section 6 (migration script outline) PARTITIONED_TABLES dict + new subsections 6.3 and 6.4",
+    "patch_text": "See t13_migration_review.md section 4 (ready to paste)",
+    "rule": "orchestrator applies; data-engineer prohibited from touching architecture.md directly"
+  },
+  "follow_up_adr_target": {
+    "file": "etl4/docs/decisions.md",
+    "entry_date": "2026-11-20",
+    "entry_title": "IMPR-01 T-13: FILE-MONTH as the single ym key for flightlist-derived vault tables",
+    "text": "See t13_migration_review.md section 5 (ready to paste; append-only log)"
+  },
+  "risk_acceptance": [
+    {"risk": "seed_watermarks not covered by offline smoke", "severity": "MEDIUM", "verdict": "ACCEPT (operator runs with live Postgres; informative skip-message on unreachable DB; follow-up smoke non-blocking)"},
+    {"risk": "Monolith kept post-migration doubles disk until step 5", "severity": "MEDIUM", "verdict": "ACCEPT (operator agency; delete-pre-gate explicitly forbidden)"},
+    {"risk": "Pre-rewind lock between steps 1 and 8", "severity": "MEDIUM", "verdict": "ACCEPT (operator-enforced; a migration-in-progress sentinel the rewind CLI refuses to pass is nice-to-have follow-up)"},
+    {"risk": "Orphan .part.parquet.<pid>.tmp from killed process", "severity": "LOW", "verdict": "ACCEPT (tmp naming invisible to vault_io and reconcile globs; cleanup one-liner provided)"},
+    {"risk": "R1b hub_flight day-vs-file-month agreement (today 100%, future unknown)", "severity": "LOW", "verdict": "ACCEPT with R1b added to architecture section 9.1 (future violation surfaces as row-count mismatch at step 4; defensive check in migrate_one is nice-to-have follow-up)"}
+  ],
+  "primary_source_conflicts_surfaced": [
+    {"claim": "Dispatch: 'Option A (firstseen) matches T-08'", "reality": "raw_vault.py L543 writes FILE-MONTH (ym_from_filename) for every flightlist-derived table. T-11 APPROVED 2026-11-19.", "resolution": "Decision follows primary source (T-08 FILE-MONTH)"},
+    {"claim": "Dispatch: 'Option B breaks T-15 ADR cross-month semantics'", "reality": "etl4/docs/decisions.md 2026-11-20 T-15 ADR states R1 closed via sink UPSERT + rewind pair, not by partition-key choice; per-ym read scope means both cross-month rows never share a frame inside build_fact_flight_for_ym", "resolution": "Both Option A and Option B are T-15 compatible; Option B is additionally compatible with committed T-08"},
+    {"claim": "Dispatch: 'Gap 3 not in architecture section 6'", "reality": "Architecture section 6.2 already specifies in-file ym retention; only the section 6 migration code template is silent", "resolution": "Patch adds explicit section 6.3 for both in-file ym and _DONE sentinel"}
+  ],
+  "approval_history_entry": {
+    "gate": "MIGRATION_SCRIPT_REVIEW_T12",
+    "approver": "data-engineer",
+    "status": "APPROVED",
+    "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t13_migration_review.md",
+    "timestamp_utc": "2026-11-20T07:00:00Z",
+    "note": "Appended to state.json.approval_history"
+  },
+  "unblocks": [
+    "T-12 status flips to APPROVED",
+    "Operator migration pass (steps 1-8 of t13_migration_review.md section 2)",
+    "Follow-up ADR append to etl4/docs/decisions.md (orchestrator homework)",
+    "architecture.md section 6 patch (orchestrator homework)"
+  ],
+  "next_action_for_orchestrator": "1. Append follow-up ADR text from t13_migration_review.md section 5 to etl4/docs/decisions.md. 2. Apply architecture.md section 6 patch from t13_migration_review.md section 4. 3. Update T-12.json status to APPROVED and operator_runbook to supersede with t13_migration_review.md section 2. 4. Operator may now execute the migration following the revised runbook; data-engineer stands by for row-count verification review at step 4 if operator requests.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-20T07:00:00Z"
+}
