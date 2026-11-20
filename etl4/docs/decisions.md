@@ -263,3 +263,23 @@ Column list in `fact_experiment_result` grows from 14 to 18: `run_id, run_date, 
 
 **Links**: T-12 commit `2145dbf`; T-13 review `t13_migration_review.md`; T-11 review approval; T-15 ADR (2026-11-20 cross-month flight reader rule above); architecture.md §6.3 + §6.4 (patches in `t13_migration_review.md` §4).
 
+### 2026-11-20 - Landing-zone accounting: data/raw/ counts as bronze footprint
+
+**Context**: Project scorecard asks for the volume of raw-landed data. The pipeline splits as-ingested bytes across two directories: `data/raw/opensky_flightlists/` (7.6 GB of Zenodo `.csv.gz` as pulled) and `data/bronze/flightlists/` (6.0 GB of parquet after the `bronze_flightlists` conversion stage). Same analogue for state vectors (`data/raw/opensky_states/` and `data/bronze/raw_states/`). Measured 2026-11-20: raw tier 7.9 GB, bronze tier 6.2 GB, combined 14.1 GB raw-landed; silver tier 15 GB post-vault.
+
+**Decision**:
+- For scorecard and report purposes, the "raw ingest footprint" is `data/raw/ + data/bronze/` (combined 14.1 GB as of 2026-11-20), not `data/bronze/` alone.
+- Rationale: both directories hold schema-preserved ingest. The parquet rewrite in `bronze_flightlists` is a format change (csv.gz -> parquet+snappy), not a transformation; snappy's 2-3x density gain over gzip-wrapped CSV is why `data/bronze/` looks smaller than `data/raw/`.
+- Silver (15 GB) is distinct and counted separately — it is Data Vault fan-out with audit columns and hash keys, not raw ingest.
+
+**Consequences**:
+- Project end report and professor submission reflect the 14.1 GB raw-landed figure; backlog task #13 "Scale bronze to ~10 GB" closes against this measurement rather than a parquet-only count.
+- Future ingest sizing uses the same convention: `du -sh data/raw data/bronze` summed.
+- Upstream of this ADR Zenodo v23.00 (48 months, 2019-01..2022-12) is exhausted and OpenSky S3 state vectors are gone (bucket emptied Nov 2026 per `project_etl4_trino_rejected` memory); growing raw-landed beyond 14.1 GB requires either live REST accumulation or a new source.
+
+**Alternatives considered**:
+- Count only `data/bronze/` and leave raw as "pre-bronze staging" — rejected: both tiers persist on disk and both represent real ingest cost; the parquet rewrite does not erase the source.
+- Delete `data/raw/` after conversion to avoid double-counting — rejected: raw `.csv.gz` is the Zenodo-authoritative byte stream and is the only artefact that can be hashed against the Zenodo manifest for idempotency checks.
+
+**Links**: backlog task #13; `etl4/screpper.py` zenodo-pull idempotency contract (checksum-matched skip); earlier memory `project_etl4_trino_rejected` (S3 bucket emptied Nov 2026).
+
