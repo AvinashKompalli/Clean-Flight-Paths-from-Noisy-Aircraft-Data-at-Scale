@@ -4,7 +4,7 @@
 
 **Scalable Kinematic Flight Trajectory Reconstruction from Noisy ADS-B Data**
 
-Team ETL4 — Nadhiya R S, Kasi Annapurna Uppalapati, Kompalli Avinash Bhargav, Sathyanarayanan C
+Team ETL4 — Kompalli Avinash Bhargav, Nadhiya R S, Kasi Annapurna Uppalapati, Sathyanarayanan C
 DA 231o — Data Engineering at Scale, Indian Institute of Science, Bangalore
 Branch `feature/pipeline-3-avinash` · 2026-11-20
 
