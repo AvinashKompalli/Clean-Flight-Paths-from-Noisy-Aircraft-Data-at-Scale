@@ -158,6 +158,51 @@ def month_minus_one(ym: str) -> str:
     return "%04d-%02d" % (y, m)
 
 
+def month_plus_one(ym: str) -> str:
+    """Return the calendar month immediately after ``ym``."""
+    _validate_ym(ym, "ym")
+    y, m = int(ym[:4]), int(ym[5:7])
+    m += 1
+    if m == 13:
+        m = 1
+        y += 1
+    return "%04d-%02d" % (y, m)
+
+
+def _detect_cross_month_overlap(from_ym: str, to_ym: str,
+                                root: Path) -> int:
+    """Count ``sat_flight_summary`` hk_flight rows that appear in both the
+    about-to-be-rewound range ``[from_ym, to_ym]`` and the next month after
+    ``to_ym``. Non-zero means rewinding without also rewinding the next month
+    will temporarily revert fact_flight.lastseen per ADR 2026-11-20. Returns
+    ``0`` if the next-month partition is absent or vault_io is unavailable."""
+    try:
+        from etl4.vault import vault_io
+    except Exception:
+        return 0
+    next_ym = month_plus_one(to_ym)
+    next_part = Path(root) / "sat_flight_summary" / ("ym=" + next_ym)
+    if not next_part.is_dir():
+        return 0
+    yms_in_range = [y for y in months_between(from_ym, to_ym)
+                    if (Path(root) / "sat_flight_summary" /
+                        ("ym=" + y)).is_dir()]
+    if not yms_in_range:
+        return 0
+    try:
+        in_range_df = vault_io.read_table(
+            "sat_flight_summary", ym_filter=yms_in_range,
+            columns=["hk_flight"], root=root)
+        next_df = vault_io.read_table(
+            "sat_flight_summary", ym_filter=[next_ym],
+            columns=["hk_flight"], root=root)
+        if in_range_df.empty or next_df.empty:
+            return 0
+        return int(in_range_df["hk_flight"].isin(next_df["hk_flight"]).sum())
+    except Exception:
+        return 0
+
+
 def _dir_size(path: Path) -> int:
     total = 0
     if not path.exists():
@@ -236,6 +281,15 @@ def rewind_vault(
               (entry["path"], entry["bytes"]), flush=True)
     print("  total: %d dirs, %d bytes" %
           (len(plan), total_bytes), flush=True)
+
+    overlap = _detect_cross_month_overlap(from_ym, to_ym, root)
+    if overlap > 0:
+        print("  WARNING: %d hk_flight rows overlap with ym=%s "
+              "(next month). Rewinding without also rewinding %s will "
+              "temporarily revert fact_flight.lastseen (ADR 2026-11-20). "
+              "Consider: --to %s" %
+              (overlap, month_plus_one(to_ym), month_plus_one(to_ym),
+               month_plus_one(to_ym)), flush=True)
 
     if dry_run:
         print("  [dry-run] no filesystem or Postgres changes", flush=True)
@@ -520,10 +574,10 @@ def rewind_all(
     deletion keeps mid-rewind readers from seeing orphan upstream rows
     (architecture section 7 rationale).
     """
-    if not yes:
+    if not yes and not dry_run:
         raise SystemExit(
             "--layer all is destructive across every layer; "
-            "re-run with --yes to confirm"
+            "re-run with --yes to confirm (or add --dry-run to preview)"
         )
     print("[rewind all] from=%s to=%s yes=%s dry_run=%s" %
           (from_ym, to_ym, yes, dry_run), flush=True)

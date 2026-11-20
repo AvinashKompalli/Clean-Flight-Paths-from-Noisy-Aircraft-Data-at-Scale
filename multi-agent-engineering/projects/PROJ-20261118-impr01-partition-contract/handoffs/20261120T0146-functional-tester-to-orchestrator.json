@@ -1,0 +1,73 @@
+{
+  "from": "functional-tester",
+  "to": "orchestrator",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-27",
+  "timestamp_utc": "2026-11-20T01:46:00Z",
+  "gate": "REWIND_E2E_T27",
+  "status": "CONDITIONAL",
+  "summary": "T-21 rewind.py validated end-to-end in a t27_sandbox Postgres schema + scratch FS root. 7/7 scenarios PASS. Three defects surfaced; one is HIGH-severity (ADR 2026-11-20 mitigation (b) unimplemented: live rewind emits no cross-month SQL detection warning), two are MEDIUM (ergonomic --yes/--dry-run ordering, and the already-known prod fact_trajectory_enriched.ym missing column). Production state untouched across every test. Pytest 92 passed before + after.",
+  "tests_run": {
+    "functional": 4,
+    "integration": 2,
+    "dashboard": 0,
+    "regression": 1
+  },
+  "results": {
+    "pass": 7,
+    "fail": 0,
+    "error": 0
+  },
+  "defects": [
+    {
+      "id": "D-27-1",
+      "severity": "HIGH",
+      "scenario": "Sc4",
+      "owner": "developer-backend",
+      "summary": "Live rewind of a ym range that contains cross-month flights emits no warning. ADR 2026-11-20 mitigation (b) requires both help-text AND a SQL detection snippet; only the help-text (epilog) is present.",
+      "patch_1_line": "Add a pre-rewind probe: SELECT count(*) FROM sat_flight_summary WHERE ym=next_month(to_ym) AND hk_flight IN (SELECT hk_flight FROM sat_flight_summary WHERE ym BETWEEN from_ym AND to_ym); if >0 print WARNING.",
+      "blocks": "re-opens rewind E2E (Sc4) for a targeted re-run"
+    },
+    {
+      "id": "D-27-2",
+      "severity": "MEDIUM",
+      "scenario": "Sc1",
+      "owner": "developer-backend",
+      "summary": "python -m etl4.orchestration.rewind --layer all --dry-run (no --yes) exits 1 because rewind_all raises SystemExit before checking dry_run. The dispatch's literal Sc1 command cannot preview the plan.",
+      "patch_1_line": "In rewind_all, short-circuit the yes-gate when dry_run=True (swap the two if branches)."
+    },
+    {
+      "id": "D-27-3",
+      "severity": "MEDIUM",
+      "scenario": "Sc3/Sc6",
+      "owner": "data-engineer (T-13)",
+      "summary": "Live production public.fact_trajectory_enriched lacks the ym column; rewind_sink only works in dry-run against prod. Already tracked by T-12 commit (NEEDS_CHANGES - 3 schema gaps flagged for T-13).",
+      "patch_1_line": "No action from T-27 side; closes with T-13 ALTER."
+    }
+  ],
+  "evidence": {
+    "report_md": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t27_rewind_e2e_report.md",
+    "driver": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t27_rewind_e2e_sandbox.py",
+    "task_json": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-27.json",
+    "results_json_scratch": "C:\\Users\\avina\\AppData\\Local\\Temp\\claude\\B--IISC-DE-Proj\\8e461c31-3453-4d7e-abd5-ad362a41f2ee\\scratchpad\\t27_rewind_3evpcse8\\t27_results.json",
+    "pytest": "92 passed in 8.15s (post-run)",
+    "prod_dim_aircraft_pre_post": "149747 -> 149747 (delta 0)",
+    "prod_watermarks_unchanged": "2 rows: (eval_mart,fact_experiment_result,2026-11) + (matrix,pipeline_runs,2022-06)",
+    "sandbox_schema_dropped": true
+  },
+  "sandbox_isolation_proof": [
+    "POSTGRES_DSN set BEFORE etl4.orchestration.rewind import so DSN_DEFAULT binds to search_path=t27_sandbox",
+    "rewind.rewind_vault.__kwdefaults__['root'] and rewind_marts.__kwdefaults__['root'] patched to scratch dirs",
+    "All rewind_vault / rewind_marts calls in the driver pass root=<scratch> explicitly",
+    "CREATE SCHEMA t27_sandbox + hand-written DDL (no LIKE public.* to avoid sequence/FK coupling)",
+    "DROP SCHEMA t27_sandbox CASCADE in finally; confirmed absent post-run"
+  ],
+  "call_order_deviation_informational": {
+    "dispatch_spec": ["matrix", "sink", "eval_mart", "marts", "vault"],
+    "code_order":    ["eval_mart", "matrix", "sink", "marts", "vault"],
+    "architecture_section_7": ["matrix", "sink", "marts", "vault"],
+    "resolution": "Code order is correct under downstream-first because eval_mart.fact_experiment_result = MAX(ym) over pipeline_runs. Dispatch spec is loose. Not a defect."
+  },
+  "next_action": "orchestrator: triage D-27-1 (open ticket to developer-backend for cross-month SQL detection snippet), triage D-27-2 (optional ergonomic patch), confirm D-27-3 is covered by T-13. After D-27-1 patch lands, re-run T-27 Sc4 for closure.",
+  "windows_cp1252_safe": true
+}
