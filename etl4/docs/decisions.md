@@ -224,3 +224,18 @@ Column list in `fact_experiment_result` grows from 14 to 18: `run_id, run_date, 
 
 **Links**: T-15 task JSON risks_for_t16; architecture.md §9.1 R1 + §9.3 bullet 1; `t16_marts_review.md` §C.2.
 
+### 2026-11-20 - fact_experiment_result schema expansion 18 -> 19 cols (IMPR-01 T-23)
+
+**Context**: ADR 2026-11-18 pinned `fact_experiment_result` at 18 columns. T-23 added a 19th column (`last_ym TEXT`) sourced from `pipeline_runs.ym` so dashboards can group eval cells by calendar month. Flagged for ADR amendment by T-24 PR5 review (F3 INFO).
+
+**Decision**:
+- `fact_experiment_result` now carries 19 columns; `last_ym` is nullable and appears last. All existing dashboard queries use explicit column lists (06/07/08 grep-confirmed no `SELECT *` consumers), so the additive change is backwards-compatible.
+- The paired `v_eval_mart_ym` view aggregates on `ym` (sourced from `pipeline_runs.ym` via `MAX(l.ym)` pass-through in the CTE) for per-month dashboards.
+- Watermark advance for the eval_mart layer uses `_YM_CALENDAR_RE` to filter out `SYN-*` sentinel values before writing to `pipeline_watermarks` (CHECK regex requires calendar `YYYY-MM`).
+
+**Consequences**:
+- Running `stage_eval_mart` on a DB where the column does not yet exist triggers the `DROP TABLE + CREATE TABLE` path (idempotent); the paired `v_pareto_frontier` + `v_eval_mart_ym` are rebuilt via `CREATE OR REPLACE VIEW` in the same txn.
+- Fresh-DB installs run `create_tables.sql` which guards `v_eval_mart_ym` with a `DO $$ IF EXISTS (information_schema.columns ...) $$` block so the first-ever install does not fail on the view (mirrors the pre-existing R9 pattern for `v_pareto_frontier`).
+
+**Links**: commit 2129532 (T-23); `t24_pr5_review.md` §D + §F3; `architecture.md` §9.3 bullet 4.
+

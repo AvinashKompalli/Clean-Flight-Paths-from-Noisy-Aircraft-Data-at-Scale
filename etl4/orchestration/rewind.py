@@ -544,6 +544,15 @@ def _parse_argv(argv: Optional[list] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="etl4.orchestration.rewind",
         description="Rewind one or more pipeline layers to before a ym range.",
+        epilog=(
+            "Cross-month note: a flight that departs month M and arrives M+1 "
+            "has rows in sat_flight_summary/ym=M AND ym=M+1. Rewinding month M "
+            "alone will temporarily revert fact_flight.lastseen (Jan value "
+            "wins at the Postgres UPSERT). To avoid this, rewind M+1 together "
+            "with M (--from M --to M+1), or rebuild M+1 immediately after. "
+            "See ADR 2026-11-20 in etl4/docs/decisions.md."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--layer", required=True, choices=LAYERS,
                    help="Layer to rewind, or 'all' for the full chain.")

@@ -257,6 +257,18 @@ tolerance-profile update.
 ### IMPR-11 - `run_matrix.py` auto-derive `--truth` from bronze for synthetic source
 **Severity: medium (dev-UX, surfaces as CRITICAL if forgotten).** DEF-001 required the developer to pass `--truth etl4/data/reference/synthetic_truth/2026-01-01.parquet` explicitly to the matrix CLI for N0 cells to score (inject_noise is skipped at N0 so no sidecar is produced). Without that flag, the metric block falls through and all 6 PDF-mandated metrics write NULL. `run_experiment.py:223` already has bronze-derived truth fallback logic - mirror the same into `run_matrix.py` so the CLI default is "just works". Effort: 1 hour. Owner: data-engineer or developer-backend. File: `etl4/bench/run_matrix.py`.
 
+### IMPR-15 - run_e2e drift check should cover sat_state_observation
+**Severity: low (pre-flight blind spot).** T-24 PR5 review F2: the T-22
+`VAULT_PARTITIONED_TABLES` drift-check list omits `sat_state_observation`
+per the original dispatch spec. The 333M-row table is the single largest
+partitioned asset in the pipeline; any watermark-vs-filesystem drift on
+it is invisible until the next vault stage runs. `qa/reconcile.py` still
+catches it post-build, but surfacing it pre-flight matches the contract
+for all other partitioned vault tables. Effort: ~5 min to extend the list
++ rerun smoke. Owner: data-engineer. File:
+`etl4/run_e2e.py` (`VAULT_PARTITIONED_TABLES` constant near the drift
+check).
+
 ### IMPR-10 - ADR for the eval_mart schema expansion
 **Severity: low (process hygiene).** 2026-11-18 orchestrator fix to
 `stage_eval_mart` grew `fact_experiment_result` from 14 columns to 18
