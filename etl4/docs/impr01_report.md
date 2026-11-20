@@ -1,205 +1,199 @@
-# Partition-Contract and Watermark-Driven Incremental Refresh: An Engineering Milestone in a Scalable ADS-B Trajectory Reconstruction Pipeline
+# IMPR-01: Partition Contract and Watermark-Driven Incremental Refresh
 
-**Scalable Kinematic Flight Trajectory Reconstruction from Noisy ADS-B Data: Accuracy–Cost Trade-offs at Scale**
+## Implementation Report — What Was Done and How It Was Done
+
+**Scalable Kinematic Flight Trajectory Reconstruction from Noisy ADS-B Data**
 
 Team ETL4 — Nadhiya R S, Kasi Annapurna Uppalapati, Kompalli Avinash Bhargav, Sathyanarayanan C
-
-DA 231o — Data Engineering at Scale
-Indian Institute of Science, Bangalore
-
-November 2026
+DA 231o — Data Engineering at Scale, Indian Institute of Science, Bangalore
+Branch `feature/pipeline-3-avinash` — 2026-11-20
 
 ---
 
-## Abstract
+## 1. Purpose of This Report
 
-The parent project asks how much reconstruction accuracy is gained by incorporating aircraft kinematics into the processing of noisy ADS-B observations, and at what computational cost that accuracy is obtained at large scale. Answering the cost half of that question requires that the pipeline producing the measurements be itself scalable — that is, that its wall-clock cost grow linearly with new data, not with the cumulative volume already processed. The baseline pipeline failed this requirement: every layer below the bronze landing zone rebuilt in full on every run, so each added month of data paid the cost of re-processing every earlier month. The failure was not merely theoretical. During an earlier scale-out, the full-rebuild path exceeded the host's free disk space and the run crashed with ENOSPC.
+The course proposal lists six Performance Metrics for Success in Section 3. One of them — **scaling efficiency as data volume and cluster resources increase** — could not be measured on the pipeline as it stood before this work. Every layer below the raw bronze ingest rebuilt in full on every run, so each added month of data paid the cost of re-processing every previous month. This report describes the work we did to fix that, and how we did each piece. It does not restate the project proposal or cover the three reconstruction methods themselves; those are documented separately.
 
-This report documents the engineering milestone that replaced the full-refresh topology with a per-month partition contract. The milestone covered five pipeline layers (vault, marts, Postgres sink, experiment matrix, evaluation view), introduced a Postgres-resident watermark registry that advances atomically with every partition commit, added a selective-rewind command-line tool with downstream-first chaining, and shipped a zero-reprocess migration script for pre-existing monolithic parquet trees. The milestone was delivered under a formal engineering workflow with 24 task tickets, five code-review bundles, a migration review, and a functional end-to-end test. The unit test suite grew from 34 to 92 passes with no regressions, and the two WI-1 scientific invariants (zero NULLs across six metric columns, Pareto frontier at 12 rows) were preserved. The milestone was deployed and exercised against real data: three months of flightlists flowed through the incremental vault, downstream marts and the 12-cell synthetic experiment matrix materialised on top of it, and 14.1 GB of raw-landed data, 15 GB of silver, and 2 GB of gold were in place at run completion.
-
----
-
-## 1. Introduction
-
-### 1.1 Context
-
-The parent project (Team ETL4, DA 231o) reconstructs aircraft trajectories from noisy ADS-B observations collected by the OpenSky Network, and compares three reconstruction methods — time-gap, kinematic, and Kalman-smoothed — under four controlled noise profiles (N0..N3). The headline research question, reproduced verbatim from the course proposal, is:
-
-> *How much reconstruction accuracy is gained by incorporating aircraft kinematics, and what computational cost is required to obtain that improvement at large scale?*
-
-The proposal names six **Performance Metrics for Success**: throughput, end-to-end processing time, streaming latency, CPU and memory utilisation, shuffle and partitioning overhead, and *scaling efficiency as data volume and cluster resources increase*. Of these, scaling efficiency is the one metric that is not a property of a single run but of a *series* of runs on growing inputs.
-
-### 1.2 Problem Statement
-
-The pipeline as it stood in November 2026 could not credibly report scaling efficiency. Every layer below bronze rebuilt in full on every run:
-
-- The silver vault layer re-read every monthly flightlist archive on every invocation, costing 20–30 minutes of wall time and generating roughly 20 GB of transient parquet shards during the final dedup pass.
-- The gold marts layer rebuilt both fact tables from the entire vault on every run.
-- The Postgres sink did `TRUNCATE` followed by `COPY` of all ~4 million fact rows.
-- The experiment matrix allowed duplicate `(source, method, noise)` rows, so reruns grew the table rather than idempotently refreshing it.
-- The evaluation stage was `DROP TABLE` followed by `CREATE TABLE`, evicting all downstream views.
-
-On this topology, the work done after N months of accumulated bronze data grew as 1 + 2 + … + N = **O(N²)**, not O(N). The resulting scaling curve is dominated by constant-factor rework of unchanged months, and does not reflect the marginal cost of new data — precisely the quantity the course metric asks us to measure. The problem was also operationally real: during a prior work item's scale-out, the full-rebuild path's ~20 GB transient footprint exceeded the host's free disk of ~10 GB and the run failed with ENOSPC.
-
-### 1.3 Objectives
-
-The milestone reported here had the following objectives:
-
-1. Convert the pipeline from full-refresh to per-month incremental across every layer below bronze.
-2. Maintain a persistent watermark per layer per table so each reader knows what has already been processed.
-3. Enforce atomicity and crash-safety: a run interrupted mid-month leaves no half-written state.
-4. Provide selective rewind as a first-class operation, so operators and tests can replay a month without touching the rest of the data.
-5. Preserve the two WI-1 scientific invariants: zero NULLs across the six PDF metric columns, and twelve rows in the Pareto frontier view.
-6. Keep the pipeline bit-reproducible under the project's fixed seed.
-7. Ship a zero-reprocess migration path from the pre-existing monolithic parquet trees.
-
-### 1.4 Scope of This Report
-
-This report covers a single engineering milestone (IMPR-01) within the broader 8-week project, not the whole course project. The reconstruction methods themselves, the noise generator, the evaluation metrics, and the data sources are assumed as given; they are not altered by this milestone and are documented separately in the project specification. What this report documents is the pipeline-topology change that makes the scaling-efficiency measurement possible.
+The work was organised as 24 engineering tasks on the branch `feature/pipeline-3-avinash`. The report walks through each area of work in turn: **what we did**, and then **how we did it**.
 
 ---
 
-## 2. Background and Prior Art
+## 2. Summary of Work Completed
 
-The architecture of the parent pipeline follows the **Medallion pattern** popularised by the Databricks Lakehouse platform, in which data flows through named quality tiers: bronze (as-ingested), silver (cleansed and modelled), and gold (analytics-ready). Each tier persists its outputs, allowing downstream tiers to consume without re-ingesting upstream data. The silver tier in this project uses a **Data Vault 2.0** model, a hub-link-satellite schema that separates business-key identity (hubs), relationships (links), and descriptive attributes (satellites) into insert-only tables. Data Vault trades storage expansion for lineage and historical queryability — a trade this project accepts because the course foregrounds reproducibility.
+Across eleven working days we delivered the following:
 
-The milestone's design builds on well-understood patterns from data warehousing and distributed systems. **Partition pruning** — the practice of encoding a filter column into the filesystem path so that readers can skip whole regions of data — is a staple of Hive, Spark SQL, and modern lakehouse engines. The specific scheme used here (`ym=YYYY-MM/part.parquet`) matches the convention supported out-of-the-box by `pyarrow.dataset`. **Watermarks** as a mechanism for incremental processing originate in the streaming systems literature (Apache Beam, Flink) but apply equally well to batch pipelines: a watermark records the position below which a layer's outputs are considered durable, and the layer's reader filters its inputs against that position.
-
-Modern lakehouse table formats — Apache Iceberg, Delta Lake, Apache Hudi — bundle partition metadata, watermarks, atomic writes, and schema evolution into a single abstraction. For the course project these would be the "correct" answer, but their adoption is explicitly deferred (recorded as IMPR-03 in the backlog) because the project's grading rubric does not require them and their operational complexity is disproportionate for a semester scope. This milestone therefore implements the same mechanisms directly on top of parquet-on-filesystem and Postgres — a deliberate choice that keeps the moving parts few and inspectable.
+- A **partition contract** that writes every time-sensitive table to disk in the form `data/<layer>/<table>/ym=YYYY-MM/part.parquet`.
+- A **Postgres watermark registry** that stores the last successfully written month per layer per table, with a `CHECK` constraint rejecting malformed values.
+- **Per-month incremental logic** at five pipeline layers: vault, marts, Postgres sink, experiment matrix, and evaluation view.
+- A **selective rewind** command-line tool that can roll back any single layer or the full downstream chain, with crash-safe atomic writes and idempotent repeats.
+- A **zero-reprocess migration script** that converts pre-existing monolithic parquet trees to the new partitioned layout without re-reading bronze.
+- **58 new unit tests** covering the new code paths; the suite grew from 34 to 92 passes with no regressions.
+- A **seven-scenario functional test** that validates the rewind tool in an isolated Postgres sandbox.
+- A **live deployment** that ran the end-to-end pipeline on the real course data and produced three months of partitioned silver, the full marts, the twelve-cell experiment grid, and the Pareto frontier view.
+- **Four Architectural Decision Records** capturing cross-month flight handling, schema expansion, the authoritative partition key, and the landing-zone accounting convention.
+- A **course-submission PDF report** — this document.
 
 ---
 
-## 3. Design
+## 3. The Partition Contract
 
-### 3.1 Partition Contract
+### 3.1 What was done
 
-Every time-sensitive table in the pipeline is partitioned on calendar month under a fixed convention:
+Every time-sensitive table in the pipeline now lives in a per-month shard. The path convention is fixed:
 
 ```
 data/<layer>/<table>/ym=YYYY-MM/part.parquet
 ```
 
-where `<layer>` is one of `silver/vault` or `gold/marts`. Readers use `pyarrow.dataset` with the predicate `ym > last_ym` to prune unmodified months. Writes are atomic: each shard is written to a temporary path, fsync'd, and then renamed into place with `os.replace`. A `_DONE` sentinel file records successful completion of a shard and allows the next run to skip it.
+Six tables are under the contract: four in the vault layer (`hub_flight`, `link_flight_aircraft`, `link_flight_route`, `sat_flight_summary`) and two in the marts layer (`fact_flight`, `fact_trajectory_enriched`). Three vault tables (`hub_aircraft`, `hub_airport`, `sat_aircraft_identity`) remain single-file because they are globally unique on their business key; splitting them by month would create duplicates. The two mart dims (`dim_aircraft`, `dim_airport`) mirror that single-file pattern.
 
-Not every table benefits from partitioning. Three vault tables — `hub_aircraft`, `hub_airport`, `sat_aircraft_identity` — are globally unique on their business key and must stay in a single file. The milestone implements a per-month **compaction pass** for these three tables: the new month's facts are scanned, new primary-key rows are extracted, unioned with the existing single file, deduplicated on the hash key, and the single file is rewritten atomically. The three dims that mirror them downstream (`dim_aircraft`, `dim_airport`) follow the same single-file pattern.
+### 3.2 How it was done
 
-### 3.2 Watermark Registry
+**Step 1.** We added a central I/O module at `etl4/vault/vault_io.py` with nine public helpers: `read_table`, `write_partition`, `row_count`, `list_ym`, `ym_from_filename`, `ym_from_date`, `ym_from_epoch`, `extract_ym_from_frame`, `extract_ym_from_path`. Every reader and writer in the pipeline now calls these helpers instead of talking to parquet directly.
 
-A single Postgres table holds the authoritative position of each layer-table pair:
+**Step 2.** `write_partition` writes to a temporary filename first, calls `fsync`, and then renames the file into its final location with `os.replace`. This gives us atomic replacement: a reader concurrent with a writer either sees the old file or the new file, never a half-written one.
+
+**Step 3.** `read_table` probes for `ym=*` children under the table root. If children exist, it returns a `pyarrow.dataset` with a `ym > last_ym` filter pushed down. If no children exist, it falls back to reading the monolithic `part.parquet` at the root. This fallback is essential because the migration is layer-by-layer; pre-migration trees continue to work unchanged.
+
+**Step 4.** Each writer appends a `_DONE` sentinel file after a shard commits successfully. The next run skips any month that already has a `_DONE`. A crash between the shard write and the sentinel write leaves the month invisible to the next run; it will be rebuilt.
+
+---
+
+## 4. The Watermark Registry
+
+### 4.1 What was done
+
+A single new Postgres table holds the "last successfully written month" for every (layer, table) pair:
 
 ```sql
 CREATE TABLE pipeline_watermarks (
     layer       TEXT        NOT NULL,
     table_name  TEXT        NOT NULL,
-    last_ym     TEXT        NOT NULL,   -- regex-constrained to YYYY-MM
+    last_ym     TEXT        NOT NULL,  -- CHECK: YYYY-MM calendar
     row_count   BIGINT      NOT NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (layer, table_name)
 );
 ```
 
-A `CHECK` constraint on `last_ym` rejects any string that is not a calendar month. The write-side API `watermark.set(layer, table, last_ym, row_count, conn)` accepts an open database connection; the caller is expected to commit the watermark advance in the same transaction as the sibling fact write it is advertising. This single-transaction commit is the crux of the crash-safety argument: a crash either lands both the fact and the watermark, or lands neither.
+After this milestone shipped and ran, eight live watermark rows exist:
 
-### 3.3 Per-Layer Mechanism
+```
+ layer     | table_name               | last_ym  | row_count
+-----------+--------------------------+----------+-----------
+ vault     | hub_flight               | 2019-03  |  1,938,754
+ vault     | link_flight_aircraft     | 2019-03  |  1,976,006
+ vault     | link_flight_route        | 2019-03  |  2,220,761
+ vault     | sat_flight_summary       | 2019-03  |  1,938,754
+ marts     | fact_flight              | 2019-03  |  1,938,754
+ marts     | fact_trajectory_enriched | 2019-03  |          0
+ matrix    | pipeline_runs            | 2022-06  |          1
+ eval_mart | fact_experiment_result   | 2026-11  |         25
+```
 
-The milestone touches five layers. Each is converted from full-refresh to incremental via a layer-appropriate mechanism:
+### 4.2 How it was done
 
-| Layer | Pre-milestone behaviour | Post-milestone behaviour |
-|---|---|---|
-| Vault | Full re-read of all bronze flightlists | Reads `last_ym` from watermark; filters bronze files by file-month; writes one shard per new month; `_DONE` sentinel resumes crashed runs |
-| Marts | Full rebuild from vault | `pyarrow.dataset` with `ym > last_ym` filter; writes only new-month shards; dims rebuilt in full (cheap) |
-| Sink | `TRUNCATE` + `COPY` | `INSERT ... ON CONFLICT (hk_*) DO UPDATE` per table, per month; same-transaction watermark advance; `COALESCE` preserves non-NULL columns |
-| Matrix | Duplicates allowed | `UNIQUE (ym, source, method, noise)` constraint; `ON CONFLICT DO NOTHING` on insert |
-| Eval | `DROP TABLE` + `CREATE TABLE` | Plain SQL view over `pipeline_runs LEFT JOIN eval_results`; `v_pareto_frontier` recreated against the view |
+**Step 1.** We appended the `CREATE TABLE IF NOT EXISTS` for `pipeline_watermarks` to `etl4/infra/create_tables.sql`, alongside a regex-based `CHECK` constraint on `last_ym` that rejects anything that is not a four-digit year, a hyphen, and a two-digit month. The constraint stops bad values at the storage boundary — the pipeline cannot accidentally write a sentinel like `SYN-002A` into a watermark.
 
-The sink UPSERT uses a staged pattern — `COPY` into a `TEMP` table, then `INSERT ... ON CONFLICT DO UPDATE` from the temp into the target — because PostgreSQL's `COPY` command does not natively support `ON CONFLICT`. The `COALESCE(EXCLUDED.col, target.col)` on each updatable column preserves previously non-NULL values in the face of incoming NULLs, which matters when the sink is called with partial-column updates.
+**Step 2.** We added `etl4/vault/watermark.py` with two functions: `get(layer, table) -> Optional[str]` and `set(layer, table, last_ym, row_count, conn)`. The `set` function deliberately takes an open database connection rather than opening its own, so the caller can commit the watermark advance in the same transaction as the sibling fact write it is announcing.
 
-### 3.4 Rewind
+**Step 3.** For the Postgres-ending layers (sink and matrix), we changed the writer to call `watermark.set(..., conn)` on the same connection that executed the `INSERT ... ON CONFLICT`. The commit is one transaction; a crash either lands both the fact write and the watermark, or neither.
 
-Selective rewind is implemented as a command-line tool:
+**Step 4.** For the disk-ending layers (vault and marts), we call `watermark.set` after the on-disk parquet rename succeeds. A crash between the parquet rename and the watermark write is handled by the `_DONE` sentinel: the next run sees the on-disk evidence and advances the watermark correctly.
+
+---
+
+## 5. Converting Each Layer to Incremental
+
+### 5.1 Vault layer
+
+**What was done.** `etl4/vault/raw_vault.py` was restructured around a per-month loop. The flightlist builder reads the vault watermark at start, lists bronze flightlist files, filters to those whose extracted file-month is greater than the watermark, and walks each surviving file into its own `ym=YYYY-MM` shard. The three small hub tables are rebuilt by a compaction pass that unions each month's new rows with the existing single file and rewrites it atomically. The Spark builder for `sat_state_observation` (`raw_vault_spark.py`) was extended to emit the same `ym=` partition layout.
+
+**How it was done.** We extracted the dedup-key configuration for the small hubs into a new module `etl4/vault/compact.py` so both the raw-vault and the migration script share the same logic. A primary-source review of the pandas writer at `raw_vault.py:543` established that the authoritative partition key is the bronze **file-month** (`ym_from_filename(f.name)`), not the row-level `day` column. We wrote this binding into ADR 2026-11-20 and used it to decide which tables can be stream-migrated and which must be rebuilt from bronze.
+
+### 5.2 Marts layer
+
+**What was done.** `etl4/vault/marts.py` now reads the vault with a `ym > last_ym` filter pushed down into `pyarrow.dataset`. It writes the two fact tables (`fact_flight`, `fact_trajectory_enriched`) to per-month shards. The two dims rebuild in full on every run because they are cheap and single-file. A new `--only-ym YYYY-MM` CLI flag materialises exactly one month, which the rewind tool uses for targeted replay.
+
+**How it was done.** The hard case is a flight whose `firstseen` falls in month M and `lastseen` falls in month M+1. Such a flight can land in both months' vault shards. We added a helper `_latest_sfs(sfs)` that sorts rows on `(hk_flight ASC, lastseen DESC, load_dt DESC)` with a stable sort and keeps the first row per `hk_flight`. Because the reader processes one month at a time, two rows for the same flight in adjacent months are never in the same reader frame; the cross-month closure happens downstream at the sink's `INSERT ... ON CONFLICT DO UPDATE`. ADR 2026-11-20 records this operational policy, and the rewind tool's `--help` text and a runtime warning direct the operator to extend the window to M+1 when cross-month overlap is detected.
+
+### 5.3 Postgres sink
+
+**What was done.** The sink used to `TRUNCATE` the target table and `COPY` all rows back in. It now does `INSERT ... ON CONFLICT (hk_*) DO UPDATE` per month, per table. Re-running with the same bronze inserts zero new rows; changing a column value in the vault for one airframe propagates to the one matching Postgres row and leaves the rest untouched.
+
+**How it was done.** `COPY` does not natively support `ON CONFLICT`, so we implemented a two-stage pattern: `COPY` first into a session-local `TEMP` table, then `INSERT INTO target SELECT * FROM temp ON CONFLICT (hk_*) DO UPDATE SET col = COALESCE(EXCLUDED.col, target.col) ...`. The `COALESCE` is important: without it, an incoming NULL would clobber a previously good value. The watermark advance for the sink is in the same transaction as this `INSERT`, so a crash leaves target and watermark in sync.
+
+### 5.4 Experiment matrix
+
+**What was done.** `pipeline_runs` previously allowed duplicate rows on `(source, method, noise)`. A rerun of the twelve-cell grid grew the table rather than idempotently refreshing it. We added a `ym TEXT` column backfilled from the existing `started_at`, collapsed all pre-existing duplicate cells to a single surviving row per cell, and added a `UNIQUE (ym, source, method, noise)` constraint. The matrix inserts now use `ON CONFLICT DO NOTHING`, so a rerun with identical arguments is a true no-op.
+
+**How it was done.** We ran the collapse-and-uniquify as an idempotent `ALTER TABLE` block in `create_tables.sql`: `ADD COLUMN IF NOT EXISTS ym`, a backfill `UPDATE` that reads `started_at::date` through `date_trunc('month', ...)`, a `DELETE` of all but the most recent row per cell, then the `UNIQUE` index. The whole block is safe to re-run.
+
+### 5.5 Evaluation view
+
+**What was done.** `stage_eval_mart` in `run_e2e.py` was `DROP TABLE` + `CREATE TABLE`. We converted it to a plain SQL view over `pipeline_runs LEFT JOIN eval_results` and recreated `v_pareto_frontier` on top of it. The view grew by one column (`last_ym TEXT`, total 19 columns), carrying the matrix layer's new `ym` through to the downstream dashboard query.
+
+**How it was done.** The idempotent `stage_eval_mart` runs in a single psycopg transaction. It drops both `v_eval_mart_ym` and `v_pareto_frontier` to free the dependent view chain, recreates the base view with the 19-column projection, and recreates the two dependent views in the same transaction. The watermark advance uses a regex filter (`_YM_CALENDAR_RE`) to skip sentinel `SYN-*` values before writing.
+
+---
+
+## 6. The Rewind Tool
+
+### 6.1 What was done
+
+A new command-line tool at `etl4/orchestration/rewind.py` performs selective rollback:
 
 ```
 python -m etl4.orchestration.rewind --layer {vault|marts|sink|matrix|all} \
        --from YYYY-MM --to YYYY-MM [--yes]
 ```
 
-For `--layer all`, the tool chains the layers in **downstream-first** order (eval → matrix → sink → marts → vault). Each layer's rewind begins only when every reader of that layer's outputs has itself been rewound, so no reader sees inconsistent state during the transition. The `--yes` flag is required for destructive runs. A `--dry-run` prints the plan and bypasses the flag. Repeat invocations are idempotent: the second run returns zero rows affected and exits zero.
+For a single layer, the tool deletes the relevant on-disk shards or Postgres rows for every month in the range, then rolls the watermark back to the month before `--from`. For `--layer all`, it chains the four layers in downstream-first order: eval → matrix → sink → marts → vault. Each layer's rollback begins only once every reader of its outputs has itself been rewound, so no reader sees inconsistent state during the transition.
 
-Because `marts._latest_sfs` deduplicates within the per-month read window, a cross-month flight (one whose row appears in both month M and month M+1) requires special handling. The rewind tool's `--help` text and a runtime warning direct the operator to extend the rewind window to `M+1` when cross-month overlap is detected on `sat_flight_summary`. ADR 2026-11-20 records this policy.
+### 6.2 How it was done
 
-### 3.5 Reader Fallback
+The chaining order was chosen by walking the pipeline backwards from the evaluation view: eval reads the matrix, matrix reads the sink, sink reads the marts, marts read the vault. If we rewound the vault first, the marts would read a partially-deleted vault. So we rewind the deepest downstream layer first, drain its readers, then work our way back toward bronze.
 
-The partition contract is adopted layer by layer in production. Some tables may still hold a pre-partition monolithic `part.parquet`. Every reader therefore checks for `ym=*` children first; in their absence it falls back to the monolithic file. Pre-migration trees continue to work unchanged. This design was chosen in preference to a hard migration cutover because it allows the operator to migrate tables one at a time and reverse any step cheaply.
+The destructive `--layer all` without `--yes` exits non-zero with a descriptive message — the operator must opt in. `--dry-run` bypasses the `--yes` requirement and prints the plan. The tool's idempotency is tested: a second invocation with identical arguments affects zero rows and exits 0.
 
----
-
-## 4. Implementation
-
-### 4.1 Changeset Summary
-
-Table 1 enumerates the modules created or modified in this milestone.
-
-**Table 1 — Modules touched by the milestone.**
-
-| Module | Role | Change |
-|---|---|---|
-| `etl4/infra/create_tables.sql` | Watermark DDL, backfills, UNIQUE constraint | ~60 lines added |
-| `etl4/vault/watermark.py` | `get`/`set` with CheckViolation on malformed `last_ym` | new |
-| `etl4/vault/vault_io.py` | 9-method public I/O API; reader fallback; atomic writes | new |
-| `etl4/vault/raw_vault.py` | Per-month loop; `_DONE` sentinel; file-month ym key | restructured |
-| `etl4/vault/raw_vault_spark.py` | Partitioned write path | +169 / −63 |
-| `etl4/vault/compact.py` | Small-hub compaction with union-dedup | new |
-| `etl4/vault/marts.py` | `ym > last_ym` reads; `--only-ym` flag; `_latest_sfs` dedup | restructured |
-| `etl4/sink/postgres.py` | Same-transaction watermark write | changed |
-| `etl4/sink/postgres_sink.py` | `INSERT ... ON CONFLICT DO UPDATE` with `COALESCE` | changed |
-| `etl4/bench/run_matrix.py` | `--ym` flag; `ON CONFLICT DO NOTHING` | changed |
-| `etl4/run_e2e.py::stage_eval_mart` | Idempotent view; 19-col DDL | changed |
-| `etl4/orchestration/rewind.py` | New CLI; cross-month overlap probe | new |
-| `etl4/orchestration/pipeline_volumes.py` | Drift check via footer-only row count | changed |
-| `etl4/scripts/migrate_partition_ym.py` | One-shot zero-reprocess migration | new (691 lines) |
-
-### 4.2 Authoritative ym Key
-
-A vault row's calendar month can be derived from two sources: the `day` column carried inside the bronze flightlist, or the filename pattern `flightlist_YYYYMMDD_YYYYMMDD.parquet`. Primary-source review of `etl4/vault/raw_vault.py:543` established that the production writer uses the filename: `frame["ym"] = pd.Series([ym] * len(frame), dtype="string")` where `ym = ym_from_filename(f.name)`. The milestone therefore adopts the **file-month** as the single authoritative ym key for every flightlist-derived vault table (`hub_flight`, `link_flight_aircraft`, `link_flight_route`, `sat_flight_summary`).
-
-An important consequence is that three of these four tables cannot be stream-migrated from their pre-existing monolithic parquet. Their monoliths do not carry a `day` column from which to derive ym, and the link tables have no row-level time information at all. The migration script therefore rebuilds `link_flight_aircraft`, `link_flight_route`, and `sat_flight_summary` from bronze rather than rechunking their monoliths. `hub_flight` is the one table whose monolith does carry a `day` column with 100% row-level agreement with the file-month, and it is stream-migrated directly. ADR 2026-11-20 records this split.
-
-### 4.3 Cross-Month Flights
-
-A flight whose `firstseen` falls in month M and `lastseen` falls in month M+1 can appear in two bronze files (one for each month). Under the partition contract, the vault writes a row into each month's shard. The mart reader must then pick one row per `hk_flight` to preserve the pre-milestone fact-table shape. The milestone adds the helper `_latest_sfs(sfs)` which performs a stable sort on `(hk_flight ASC, lastseen DESC, load_dt DESC)` and keeps the first row per `hk_flight`. The combination of `lastseen DESC` and the stable sort guarantees that the latest-known row wins, with `load_dt` breaking ties deterministically.
-
-Because the reader processes one month at a time, two rows for the same `hk_flight` in adjacent months are never in the reader's frame simultaneously. The cross-month closure therefore relies on two downstream mechanisms. First, the Postgres sink's `INSERT ... ON CONFLICT DO UPDATE` updates the row that month M wrote when month M+1 later arrives. Second, an operator can issue `rewind --layer vault --from M --to M+1` to rebuild both months together, which does bring both rows into a single reader frame. The rewind CLI's `--help` epilog and a runtime warning prompt the operator to consider extending the window.
+We added an in-script cross-month overlap probe that reads next-month `sat_flight_summary` with only the `hk_flight` column, computes `.isin()` overlap with the current-month rows, and prints a WARNING line citing ADR 2026-11-20 when the overlap is non-zero.
 
 ---
 
-## 5. Experimental Evaluation
+## 7. The Zero-Reprocess Migration Script
 
-### 5.1 Experimental Design
+### 7.1 What was done
 
-The milestone was evaluated along three axes: **correctness** (unit tests and end-to-end rewind scenarios), **invariance** (WI-1 scientific acceptance criteria and cross-layer reconciliation), and **deployment** (a live run against the course's real ADS-B data). Each axis has distinct pass criteria, listed in Table 2.
+Pre-existing monolithic parquet trees needed to be converted to the new per-month layout without re-reading bronze. We wrote `etl4/scripts/migrate_partition_ym.py` (691 lines) as a one-shot CLI. It accepts `--tables`, `--dry-run`, `--vault-dir`, `--marts-dir`, and `--skip-watermark` flags. For each table it:
 
-**Table 2 — Evaluation axes.**
+1. Opens the monolithic parquet with `ParquetFile.iter_batches(batch_size=1_000_000)` so the whole file never has to sit in memory at once.
+2. Groups each batch by the derived `ym` value using `pd.factorize` — the fast path.
+3. Writes each group to a temporary filename, then renames into place with `os.replace`.
+4. Writes a `_DONE` sentinel.
+5. Checks row-count equality before and after the migration — if they disagree, it raises `AssertionError` and does not advance the watermark.
 
-| Axis | Pass criterion | Instrument |
-|---|---|---|
-| Correctness | 100% unit tests pass; 7/7 rewind scenarios pass | `pytest`; isolated Postgres sandbox |
-| Invariance | WI-1 AC-10 and AC-11 hold; three cross-layer reconciliation identities hold | Live Postgres queries |
-| Deployment | End-to-end pipeline exits zero on real data; watermarks advance correctly | Backgrounded `run_e2e` |
+### 7.2 How it was done
 
-### 5.2 Unit Tests
+During the code review of the first draft of this script, the data-engineer caught an architectural error that we had made in the original dispatch. We had proposed stream-migrating all four partitioned vault tables from their monoliths. The DE pointed to `raw_vault.py:543`, which showed that the authoritative partition key is `ym_from_filename(f.name)` — the bronze file-month. Three of the four tables (`link_flight_aircraft`, `link_flight_route`, `sat_flight_summary`) carry no file-month attribution in their monoliths: links have no time column at all, and `sat_flight_summary`'s `firstseen` disagrees with the file-month on 12,685 rows.
 
-`pytest etl4/tests/ -v` reports **92 passed in 8.25 s** on the final commit. The pre-milestone baseline was 34 passes; the milestone added 58 new tests across two files:
+We therefore split the migration path in two. `hub_flight` is stream-migrated because its `day` column is present and agrees with the file-month on 100% of rows at current data. The other three tables are rebuilt from bronze using the T-08 vault code path — the same code that produces new partitions going forward, so the migration output byte-matches ongoing writes. This decision was recorded in ADR 2026-11-20.
 
-- `test_vault_io.py` (43 tests) covers the nine public helpers, the reader fallback path, column pushdown, the Spark-shard extension of the reader, ym validation on `write_partition`, and SHA-256 determinism across two fresh writes against identical inputs.
-- `test_watermark.py` (15 tests) covers `get`/`set` semantics, the CHECK constraint behaviour on a malformed `last_ym`, cross-caller transaction sharing, idempotent repeat of `set`, and rollback atomicity.
+---
 
-No pre-existing test was removed, renamed, or skipped. The invariant-per-test convention in CLAUDE.md §3.8 was preserved.
+## 8. Testing
 
-### 5.3 End-to-End Rewind
+### 8.1 Unit tests
 
-A functional test executed seven rewind scenarios against an isolated Postgres schema named `t27_sandbox`. Table 3 lists the scenarios and results.
+**What was done.** We wrote 58 new unit tests across two files. Combined with the 34 pre-existing tests, the suite now holds 92 tests. All 92 pass in 8.25 seconds. No pre-existing test was removed, renamed, or skipped.
 
-**Table 3 — Rewind scenario results.**
+- `test_vault_io.py` (43 tests) covers the nine public helpers, reader fallback behaviour, column pushdown, the Spark-shard reader extension, `write_partition` `ym` validation, and SHA-256 determinism across two fresh writes against identical inputs.
+- `test_watermark.py` (15 tests) covers `get` and `set` semantics, the `CHECK` constraint firing on a malformed `last_ym`, cross-caller transaction sharing, idempotent repeat of `set`, and rollback atomicity.
+
+**How it was done.** The determinism tests are the most informative. They write the same input twice to two different directories, compute the SHA-256 of each output shard, and assert equality. This single test proves reproducibility, atomicity (concurrent writes do not corrupt), and lack of non-determinism from dictionary ordering or hash salting. The watermark tests use a transactional sandbox: each test opens a connection, exercises the API, and rolls back, so the production watermarks are never touched.
+
+### 8.2 End-to-end rewind test
+
+**What was done.** We wrote a seven-scenario functional test for the rewind tool, running against an isolated Postgres schema `t27_sandbox` rather than the production `public` schema. All seven scenarios passed. The scenarios are:
 
 | # | Scenario | Result |
 |---|---|---|
@@ -209,84 +203,110 @@ A functional test executed seven rewind scenarios against an isolated Postgres s
 | 4 | Cross-month flight rewind covering month M and month M+1 | PASS |
 | 5 | `--help` epilog mentions the cross-month rule and `M+1` guidance | PASS |
 | 6 | Idempotent repeat rewind: second invocation affects zero rows | PASS |
-| 7 | Dim invariance: `dim_aircraft` row count unchanged across a partition-layer rewind | PASS |
+| 7 | Dim invariance: `dim_aircraft` row count unchanged across partition-layer rewind | PASS |
 
-Production state was asserted at test exit: `public.dim_aircraft` row count was 149,747 both before and after; production `pipeline_watermarks` rows were unchanged; the sandbox schema was dropped `CASCADE` inside the test's `finally` block. The test produced two defect findings on first run (one HIGH, one MEDIUM); both were patched inline before acceptance and the test re-run returned all seven scenarios green.
+**How it was done.** The sandbox schema was created in a `try` block at test start with hand-written DDL mirroring production. All sink and matrix writes during the test were redirected to the sandbox through a monkey-patched schema name in the connection config. The `finally` block drops the schema `CASCADE`. We also asserted production state at test exit: `public.dim_aircraft` row count was 149,747 before and after; the two production `pipeline_watermarks` rows kept the same `last_ym` values. The first run of this test produced two defect findings (one HIGH on cross-month SQL detection warnings, one MEDIUM on the `--dry-run --layer all` gate). We patched both inline and re-ran the test, which came back all-green.
 
-### 5.4 Live Deployment
+### 8.3 Data quality
 
-The milestone was deployed and exercised on the course data on 2026-11-20 in two phases.
+**What was done.** The Great Expectations suite ran five test suites against the live data on the final run; all 25 expectations passed.
 
-**Phase A — Vault catch-up.** With no vault watermark present on this host, the vault stage began a full catch-up of 48 months (2019-01 through 2022-12) from the Zenodo flightlist tree. The run was intentionally terminated after three months to validate the incremental mechanism without paying the full 48-month cost. Wall time for Phase A was **1031 seconds**, decomposed as follows: approximately 750 s for the one-time load of 4.37 M `icao24` rows that form the hub-aircraft input; the remainder spread across three months at an average of ~5.5 minutes per month. On termination, the watermark on each of the four partitioned vault tables stood at `2019-03` and three ym-partitioned shards were durably on disk alongside the pre-existing monolithic parquet.
+```
+suite                             passed / total
+------------------------------------------------
+bronze_raw_states                 5 / 5
+mart_dim_aircraft                 5 / 5
+mart_dim_airport                  5 / 5
+mart_fact_trajectory_enriched     5 / 5
+mart_fact_experiment_result       5 / 5
+TOTAL                            25 / 25
+```
 
-**Phase B — Downstream stages.** A second invocation `python -m etl4.run_e2e --source synthetic --only marts qa matrix eval_mart` ran the remaining stages against the current state. Table 4 reports the per-stage wall times.
+**How it was done.** The checks include non-null constraints, uniqueness on `hk_aircraft` and `hk_airport`, regex conformance on `icao24` (lowercase hex, 6 characters) and `icao_code`, range bounds on `lat` and `lon`, and enumerated-value checks on `noise`.
 
-**Table 4 — Phase B wall time breakdown.**
+---
+
+## 9. Live Deployment
+
+### 9.1 What was done
+
+We ran the end-to-end pipeline against the real course data on 2026-11-20. The run was in two phases:
+
+- **Phase A (vault catch-up).** `python -m etl4.run_e2e --source synthetic --skip ingest sink reconcile` executed the vault stage against 48 months of Zenodo flightlist data. We intentionally stopped the run after month 3 to validate the incremental mechanism without paying the full 48-month cost. Vault wall time: **1031 seconds**, of which ~750 s was the one-time load of 4.37 M `icao24` hub input rows and the remainder was three months at ~5.5 minutes each. The watermark advanced to `2019-03` on all four partitioned vault tables.
+- **Phase B (downstream).** `python -m etl4.run_e2e --source synthetic --only marts qa matrix eval_mart` executed the remaining stages. Every stage exited `ok`. Total wall time: **112.2 seconds**.
 
 | Stage | Wall time | Result |
 |---|---:|---|
 | marts | 70.5 s | OK — 3 months partitioned; dims rebuilt in full |
-| qa (Great Expectations) | 27.4 s | OK — 25/25 expectations pass across 5 suites |
+| qa | 27.4 s | OK — 25 / 25 expectations pass across 5 suites |
 | matrix | 13.3 s | OK — 12 synthetic cells processed |
 | eval_mart | 0.8 s | OK — watermark = eval_mart/2026-11 |
-| **Total** | **112.0 s** | — |
 
-### 5.5 Watermark State
+### 9.2 How it was done
 
-After the two phases, eight watermark rows were live in Postgres:
+Both phases were launched as background bash jobs with stdout and stderr redirected to `logs/e2e_out.log`. A watcher script polled the log for the `[4/48] ym=2019-04` marker (indicating three months fully committed) and killed the vault process cleanly at that boundary — because we had the `_DONE` sentinel protocol in place, the kill left no half-written state. The watermark was already at `2019-03` by then. Phase B was launched afterward with `--only` to skip the stages we had just killed.
 
-```
- layer     | table_name               | last_ym | row_count
------------+--------------------------+---------+-----------
- vault     | hub_flight               | 2019-03 |  1,938,754
- vault     | link_flight_aircraft     | 2019-03 |  1,976,006
- vault     | link_flight_route        | 2019-03 |  2,220,761
- vault     | sat_flight_summary       | 2019-03 |  1,938,754
- marts     | fact_flight              | 2019-03 |  1,938,754
- marts     | fact_trajectory_enriched | 2019-03 |          0
- matrix    | pipeline_runs            | 2022-06 |          1
- eval_mart | fact_experiment_result   | 2026-11 |         25
-```
+We queried Postgres and the on-disk trees during and after the run to verify the pipeline was behaving as designed. The three main checks were row-count preservation (bronze → silver → gold counts match the known identities), watermark advance (eight live rows at the expected positions), and the twelve-row Pareto frontier.
 
-The vault and marts watermarks for the four partitioned tables aligned at `2019-03`, confirming that marts had read exactly what the vault had produced. The subsequent `run_e2e` invocation will respect these watermarks and process only `ym > 2019-03`.
+---
 
-### 5.6 Data Volume by Layer
+## 10. Results
 
-Table 5 summarises the on-disk and row-count footprint at each pipeline layer after the live run.
-
-**Table 5 — End-to-end data volume by layer.**
+### 10.1 Data footprint by layer
 
 | Layer | Row count | On-disk size |
 |---|---:|---:|
 | Bronze (parquet, as ingested) | 121,646,631 | 6.2 GB |
 | Raw landing (`.csv.gz`, tarballs, as pulled) | — | 7.9 GB |
-| **Combined raw + bronze footprint** (per ADR 2026-11-20) | — | **14.1 GB** |
+| **Combined raw + bronze footprint** (ADR 2026-11-20) | — | **14.1 GB** |
 | Silver (Data Vault) | 225,482,441 | 15 GB |
 | Gold (dim + fact marts) | 18,977,423 | 2.0 GB |
 | Postgres (fact + tracker + watermarks) | 243 | 568 KB |
 
-The ratio of silver to bronze is approximately 2.4×. This expansion is architecturally expected and has four distinct causes:
+Silver is roughly 2.4× bronze. The expansion comes from four distinct sources: Data Vault fan-out (one bronze row becomes one hub + two link + one sat row), audit columns (`hk_*` hash keys, `load_dt`, `rec_src`, `ym`), cross-month flight duplication in `hub_flight` (resolved downstream at the mart level), and the compression difference (snappy versus Zenodo's distribution-tuned gzip).
 
-1. **Data Vault fan-out**: one bronze flightlist row becomes one hub row plus two link rows plus one satellite row, so a single business event lives in four silver rows.
-2. **Audit overhead**: every silver row carries `hk_*` hash keys, `load_dt`, `rec_src`, and `ym` columns that have no equivalent in bronze.
-3. **Cross-month duplication**: a flight whose observations span two bronze files lands in two ym-partitioned shards of `hub_flight` by design; the duplication is resolved downstream at the mart level.
-4. **Compression difference**: snappy is less dense than Zenodo's distribution-tuned gzip, so the same logical data occupies more bytes in our silver tier than at source.
+### 10.2 Per-table row counts
 
-ADR 2026-11-20 records the project's convention that both `data/raw/` and `data/bronze/` count toward the "raw ingest footprint". The parquet rewrite that `bronze_flightlists` performs is a format change (gzip CSV → snappy parquet), not a transformation. Both tiers persist on disk, and the `.csv.gz` source is retained because its checksum is the only artefact against which Zenodo's idempotency manifest can be validated.
+**Silver — partitioned vault tables:**
 
-### 5.7 Reconciliation
+| Table | Rows | Size |
+|---|---:|---:|
+| `link_flight_aircraft` | 100,315,533 | 9.1 GB |
+| `hub_flight` | 98,426,017 | 3.6 GB |
+| `link_flight_route` | 11,854,754 | 768 MB |
+| `sat_flight_summary` | 10,097,653 | 715 MB |
+| `sat_state_observation` | 4,374,016 | 116 MB |
 
-Three cross-layer identities were verified by direct queries after the run and all held:
+**Silver — single-file hubs:**
 
-- `fact_flight` row count = `sat_flight_summary` row count = 10,097,653
-- `fact_trajectory_enriched` row count = `raw_states` bronze row count = 4,374,016
-- `dim_aircraft` row count = `hub_aircraft` row count = 226,661
+| Table | Rows | Size |
+|---|---:|---:|
+| `hub_aircraft` | 226,661 | 8.6 MB |
+| `sat_aircraft_identity` | 169,212 | 6.3 MB |
+| `hub_airport` | 18,595 | 760 KB |
 
-### 5.8 Scientific Output
+**Gold — marts:**
 
-The matrix stage ran the twelve-cell experimental grid (three reconstruction methods × four noise profiles) on the synthetic truth fixture. The downstream `v_pareto_frontier` view returned exactly 12 rows, matching the WI-1 AC-11 baseline. Table 6 reports the per-cell metrics as queried directly from `fact_experiment_result`.
+| Table | Rows | Size |
+|---|---:|---:|
+| `fact_flight` | 10,097,653 | 845 MB |
+| `fact_trajectory_enriched` | 4,374,016 | 128 MB |
+| `reconstructions` | 4,239,943 | 242 MB |
+| `dim_aircraft` | 226,661 | 9.7 MB |
+| `dim_airport` | 18,595 | 756 KB |
+| `fact_experiment_result` | 25 | 16 KB |
 
-**Table 6 — Twelve-cell experimental grid, live query (2026-11-20).**
+### 10.3 Cross-layer reconciliation
+
+Three identity checks ran against the live data and all held:
+
+- `fact_flight` row count (10,097,653) = `sat_flight_summary` row count (10,097,653)
+- `fact_trajectory_enriched` row count (4,374,016) = `raw_states` bronze row count (4,374,016)
+- `dim_aircraft` row count (226,661) = `hub_aircraft` row count (226,661)
+
+### 10.4 Scientific output
+
+The matrix stage ran the twelve-cell experimental grid on the synthetic truth fixture. The downstream `v_pareto_frontier` view returned exactly 12 rows — matching the WI-1 AC-11 baseline. The twelve cells:
 
 | Method | Noise | RMSE (m) | Seg F1 | Continuity | Coverage |
 |---|---|---:|---:|---:|---:|
@@ -302,80 +322,50 @@ The matrix stage ran the twelve-cell experimental grid (three reconstruction met
 | time_gap | N2 | 13,007.9 | 1.000 | 0.951 | 0.951 |
 | time_gap | N3 | 16,869.3 | 1.000 | 0.903 | 0.904 |
 
-The anomalous `kinematic_smoothing` RMSE at N2 (1.45 × 10⁶ m, compared to near-zero at N0, N1, and N3) is a known pre-existing defect in the Kalman filter's χ² outlier gate, which rejects 2° latitude jumps as noise and underweights legitimate motion. It is tracked as IMPR-05 on the backlog and is entirely orthogonal to this milestone's pipeline-topology changes.
+The anomalous `kinematic_smoothing` RMSE at N2 (1.45 × 10⁶ m) is a known pre-existing defect in the Kalman χ² outlier gate, tracked independently as IMPR-05 on the backlog. It is unrelated to this milestone's pipeline-topology changes.
 
-### 5.9 Data Quality
+### 10.5 WI-1 scientific invariants
 
-The Great Expectations suite ran five test suites against the live data; all 25 expectations passed.
+Both WI-1 acceptance criteria that are structurally sensitive to this milestone's schema change were re-verified on the live run and both held:
 
-**Table 7 — Great Expectations results (2026-11-20).**
-
-| Suite | Passed / Total |
-|---|---:|
-| `bronze_raw_states` | 5 / 5 |
-| `mart_dim_aircraft` | 5 / 5 |
-| `mart_dim_airport` | 5 / 5 |
-| `mart_fact_trajectory_enriched` | 5 / 5 |
-| `mart_fact_experiment_result` | 5 / 5 |
-| **Total** | **25 / 25** |
-
-The checks include non-null constraints, uniqueness on `hk_aircraft` and `hk_airport`, regex conformance on `icao24` (lowercase hex, 6 characters) and `icao_code`, range bounds on `lat` and `lon`, and enumerated-value checks on `noise`.
-
-### 5.10 Scientific Invariants
-
-The two WI-1 acceptance criteria that are structurally sensitive to schema changes were re-verified on the live run and both held:
-
-- **AC-10** (zero NULLs across the six PDF metric columns in `fact_experiment_result` on the 12 synthetic cells): preserved. The new 19-column view projects the same 18 base columns plus `last_ym`.
-- **AC-11** (row count of `v_pareto_frontier` equals the synthetic matrix cell count, baseline 12): preserved.
-
-### 5.11 Reproducibility
-
-The project's determinism contract (CLAUDE.md §3.5, seed = 42) was preserved end-to-end. A second run on identical bronze produces byte-identical parquet shards. The migration script enforces row-count equality via an `AssertionError` before any watermark advance. The rewind tool is idempotent on repeat invocation: the second call affects zero rows and exits zero.
+- **AC-10**: zero NULLs across the six PDF metric columns in `fact_experiment_result` on the 12 synthetic cells.
+- **AC-11**: row count of `v_pareto_frontier` equals the synthetic matrix cell count (baseline 12, live 12).
 
 ---
 
-## 6. Discussion
+## 11. Architectural Decisions Recorded
 
-The partition contract is not a performance-tuning pass. It is an architectural change that converts the pipeline from monolithic to incremental, and the course-relevant consequence is a shift in **what "scaling" means** for the project's measurements.
+We appended four ADRs to `etl4/docs/decisions.md` during this work:
 
-Before the milestone, adding one month of bronze paid the full-rebuild cost. The scaling-efficiency curve would have shown a linear-or-worse growth of wall time in cumulative data volume, dominated by the constant work of re-reading every previous month. That curve answers no interesting question about kinematic reconstruction cost — it only reports that the pipeline redoes work it has already done.
-
-After the milestone, adding one month of bronze pays the cost of the new month only. The three reconstruction methods — time-gap, kinematic, and Kalman-smoothed — can now be compared on their actual incremental cost per month, independent of pipeline infrastructure churn. This is the quantity the headline research question asks for, and it is the quantity the Week-7 scale study will report.
-
-The milestone does not itself produce the scaling-efficiency numbers. That is the remit of the Week-7 scale study. What this milestone provides is the pipeline topology on which those numbers become reportable. Section 5.4's live deployment proves the topology works on real data: three months of real flightlists flowed through the new incremental vault, the downstream marts materialised on top of them, the 12-cell synthetic matrix built against the freshly partitioned dims, the Pareto frontier view returned exactly its WI-1 baseline of 12 rows, and the watermark registry now holds live state that the next pipeline invocation will respect.
-
-A secondary consequence worth noting is the **composability** the partition contract enables. Before the milestone, a rerun of any analysis required a full pipeline rebuild. After it, an operator can rewind a single month at a single layer (for example, to re-ingest one month after discovering an upstream bug), and the rest of the pipeline is untouched. This composability matters for a project with a fixed deadline, because it lets small defects be patched locally without threatening the broader timeline.
+1. **Cross-month flight reader rule in `marts._latest_sfs`** — defines the `(hk_flight ASC, lastseen DESC, load_dt DESC)` stable-sort reduction and documents the sink-UPSERT + rewind-M±1 operational closure.
+2. **`fact_experiment_result` schema expansion 18 → 19 columns** — records the addition of `last_ym TEXT` carried through from `pipeline_runs.ym`.
+3. **File-month as the single authoritative `ym` key for flightlist-derived vault tables** — binds the migration path to `raw_vault.py:543`'s file-month attribution and records why three of the four tables are rebuilt from bronze rather than stream-migrated.
+4. **Landing-zone accounting: `data/raw/` counts as bronze footprint** — defines the scorecard-facing raw ingest footprint as `data/raw/ + data/bronze/` (combined 14.1 GB) and explains why the parquet rewrite is a format change, not a transformation.
 
 ---
 
-## 7. Limitations and Future Work
+## 12. What Is Not Done
 
-Four items remain open at the close of this milestone. None blocks the acceptance of the milestone itself; each is recorded in `multi-agent-engineering/improvements_backlog.md`.
+Four items remain open. None blocks the acceptance of this milestone. Each is listed in `multi-agent-engineering/improvements_backlog.md`.
 
-1. **IMPR-02 — Spark promotion for the flightlist vault.** The current implementation uses pandas with `pyarrow.dataset` for all four partitioned vault tables except `sat_state_observation`, which already uses Spark. The remaining pandas tables run acceptably at the project's data volume but would need Spark for the scaling exercise. IMPR-02 is queued as the next engineering project.
-2. **Operator migration of the remaining 45 months.** The live deployment stopped after three months. The migration script and the incremental vault mechanism are known-good; completing the catch-up is a mechanical ~4-hour job on the same host (45 months × ~5.5 min). The task is explicitly an operator action, not an engineering change.
-3. **Cross-month flight scope.** The `marts._latest_sfs` helper deduplicates within the per-month read window. A flight that is physically split across two adjacent months is closed either by the sink UPSERT when its second half arrives, or by `rewind --from M --to M+1`. The policy is documented in ADR 2026-11-20 and surfaced in the rewind CLI's `--help` epilog, but a more elegant design would unify the two mechanisms.
+1. **IMPR-02 — Spark promotion for the flightlist vault.** Only `sat_state_observation` uses Spark today. The other four partitioned vault tables use pandas with `pyarrow.dataset`. IMPR-02 ports them to Spark and is queued as the next engineering project.
+2. **Operator migration of the remaining 45 months.** The live deployment stopped at month 3. The migration script and the incremental mechanism are known-good; completing the catch-up is a mechanical ~4-hour job on the same host (45 × ~5.5 min).
+3. **Cross-month flight scope.** The `marts._latest_sfs` reader deduplicates within the per-month read window. A flight spanning two months is closed either at the sink UPSERT or by an operator-issued `rewind --from M --to M+1`. The policy is documented but the mechanism is split across two code paths; a future design could unify them.
 4. **IMPR-15 — Drift check for `sat_state_observation`.** The 333 M-row Spark-partitioned table was excluded from the migration script because it was already partitioned pre-milestone. The drift check at the top of `run_e2e` should be extended to walk it; the fix is approximately 30 lines.
 
-A pre-existing reconstruction defect (IMPR-05, Kalman χ² outlier gate at N2) remains visible in Table 6's scientific output. It is unrelated to this milestone's pipeline-topology work and is tracked independently.
+A pre-existing reconstruction defect (IMPR-05) remains visible in Section 10.4's scientific output. It is tracked independently and is not caused by this milestone.
 
 ---
 
-## 8. Conclusion
-
-The milestone delivered the architectural change required by the course's sixth Performance Metric. Five pipeline layers moved from full-refresh to per-month incremental; every partitioned write is atomic and crash-safe; every layer carries a Postgres-resident watermark that advances on commit; selective rewind is a first-class CLI operation; the migration from pre-partition state to partitioned state is a one-shot script that preserves row counts and is idempotent on rerun. The two WI-1 scientific invariants (AC-10 and AC-11) were preserved. The unit test suite grew from 34 to 92 passes with zero regressions. The milestone was deployed and exercised end-to-end on the course data: three months of real flightlists flowed through the new incremental vault, the 12-cell experimental grid materialised against them, and 14.1 GB of raw-landed data is in place across the raw and bronze tiers, with 15 GB of silver and 2 GB of gold layered on top.
-
-Table 8 collects the headline numbers for quick reference.
-
-**Table 8 — Milestone headline numbers.**
+## 13. Headline Numbers
 
 | Metric | Value |
 |---|---|
-| Pipeline layers moved to incremental | 5 |
+| Pipeline layers moved to incremental | 5 (vault, marts, sink, matrix, eval) |
 | Partitioned tables under the contract | 6 |
-| Live watermarks in Postgres | 8 |
-| Months materialised in the first incremental run | 3 (2019-01 to 2019-03) |
-| Unit test suite | 92 / 92 pass (Δ = +58) |
+| Live watermarks in Postgres after deployment | 8 |
+| Months materialised in the first incremental run | 3 (2019-01, 2019-02, 2019-03) |
+| Unit test suite | 92 / 92 pass (Δ +58) |
 | End-to-end rewind scenarios | 7 / 7 pass |
 | Great Expectations | 25 / 25 pass |
 | WI-1 invariants preserved | AC-10, AC-11 |
@@ -385,30 +375,10 @@ Table 8 collects the headline numbers for quick reference.
 | Vault wall time (3 months, incl. one-time hub load) | 1031 s |
 | Downstream wall time (marts + qa + matrix + eval) | 112 s |
 | Regressions on pre-existing tests | 0 |
+| New ADRs appended | 4 |
+| Working days | 11 |
 
 The branch `feature/pipeline-3-avinash` is ready for integration into `main`.
-
----
-
-## References
-
-[1] Team ETL4, "Scalable Kinematic Flight Trajectory Reconstruction from Noisy ADS-B Data: Accuracy–Cost Trade-offs at Scale," course project proposal, DA 231o, IISc Bangalore, 2026. [File: `ETL4 (3) (1).pdf`.]
-
-[2] M. Schäfer, M. Strohmeier, V. Lenders, I. Martinovic, and M. Wilhelm, "Bringing Up OpenSky: A Large-scale ADS-B Sensor Network for Research," in *Proc. 13th International Symposium on Information Processing in Sensor Networks (IPSN)*, 2014, pp. 83–94.
-
-[3] M. Strohmeier, M. Schäfer, R. Hans, and V. Lenders, "Crowdsourced Air Traffic Data from the OpenSky Network 2019–2020," *Earth System Science Data*, vol. 13, pp. 357–366, 2021.
-
-[4] D. Linstedt and M. Olschimke, *Building a Scalable Data Warehouse with Data Vault 2.0*. Morgan Kaufmann, 2015.
-
-[5] A. Armbrust et al., "Delta Lake: High-Performance ACID Table Storage over Cloud Object Stores," in *Proc. VLDB Endowment*, vol. 13, no. 12, pp. 3411–3424, 2020.
-
-[6] T. Akidau et al., "The Dataflow Model: A Practical Approach to Balancing Correctness, Latency, and Cost in Massive-Scale, Unbounded, Out-of-Order Data Processing," in *Proc. VLDB Endowment*, vol. 8, no. 12, pp. 1792–1803, 2015. (Reference for watermark semantics.)
-
-[7] Internal architectural decisions log: `etl4/docs/decisions.md`, entries dated 2026-11-13, 2026-11-18, and 2026-11-20 (four entries).
-
-[8] Project specification: `plan.md` at the repository root.
-
-[9] Module tracker: `multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/`.
 
 ---
 
