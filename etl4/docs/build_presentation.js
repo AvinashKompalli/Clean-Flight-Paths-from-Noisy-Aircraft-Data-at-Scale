@@ -198,12 +198,18 @@ function fitColumn(slide, cards, x, y, w, bottom, gap) {
 }
 
 // A row of equal-height cards. Returns the y below the row.
+// Pass `bottom` for a row that must clear the footnote: it throws at build time
+// instead of silently overlapping, which the geometry audit would only catch later.
 function cardRow(slide, y, cards, opts) {
   const o = opts || {};
   const gap = o.gap === undefined ? 0.22 : o.gap;
   const total = o.w || W;
   const cw = (total - gap * (cards.length - 1)) / cards.length;
   const h = o.h || Math.max(...cards.map((c) => cardHeight(c, cw)));
+  if (o.bottom !== undefined && y + h > o.bottom + 0.001) {
+    throw new Error(`cardRow overflow: row ends at ${(y + h).toFixed(2)}in, limit ` +
+                    `${o.bottom.toFixed(2)}in [first head: ${cards[0].head.split("\n")[0]}]`);
+  }
   cards.forEach((c, i) => drawCard(slide, c, (o.x || X) + i * (cw + gap), y, cw, h));
   return y + h + (o.after === undefined ? 0.24 : o.after);
 }
@@ -328,36 +334,36 @@ s.addText([
     options: { breakLine: true } },
   { text: "Data Engineering at Scale, Indian Institute of Science, Bangalore  |  November 2026" },
 ], { placeholder: "body" });
-s.addNotes("Course project for DA 231o. The deliverable is a working lakehouse pipeline plus a measured comparison of three trajectory reconstruction methods.");
+s.addNotes("This is a course project for DA 231o. The deliverable has two parts: a lakehouse pipeline, and a measured comparison of three reconstruction methods.");
 
 /* 2 ------------------------------------------- problem: not trajectories */
 pres.addSection({ title: "Problem" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Problem" });
 s.addText("ADS-B gives us position reports, not flights", { placeholder: "title" });
-let y = lead(s, "Aircraft broadcast a position roughly once per second. OpenSky aggregates those broadcasts from several thousand crowdsourced receivers into one interleaved stream with no flight boundaries marked.");
+let y = lead(s, "Aircraft broadcast a position about once each second. OpenSky collects these broadcasts from several thousand receivers. The result is one mixed stream, and it does not mark flight boundaries.");
 cardRow(s, y, [
   { head: "1.  Order the stream",
-    body: "Group reports by aircraft and sort by the time the observation was made. Reports arrive out of order, so arrival time cannot be trusted as event time." },
+    body: "Group the reports by aircraft. Sort them by observation time. Reports arrive out of order, so arrival time is not the event time." },
   { head: "2.  Find the boundaries",
-    body: "Decide where one flight ends and the next begins. One airframe flies several distinct flights in a day, and the raw stream does not distinguish them." },
+    body: "Find where one flight ends and the next one starts. One airframe flies several flights in a day. The raw stream does not separate them." },
   { head: "3.  Repair the path",
-    body: "Make the trajectory continuous and physically plausible. Points go missing, overlapping receivers duplicate them, and some values are corrupt." },
+    body: "Make the trajectory continuous and physically possible. Some points are absent. Receivers that overlap duplicate other points. Some values are corrupt." },
 ]);
 footnote(s, [
   "Source: OpenSky Network monthly flight-record archives 2019 to 2022, daily state-vector archives, and the live REST feed.",
-  "Scope: convert that stream into trajectories at scale, implement three strategies for the boundary problem, and measure the accuracy and the cost of each.",
+  "Scope: convert the stream into trajectories at scale, implement three methods for the boundary problem, and measure the accuracy and the cost of each one.",
 ]);
-s.addNotes("The core point: the raw stream is not the deliverable. Everything downstream exists to turn it into flights.");
+s.addNotes("The raw stream is not the deliverable. Every stage after it converts the stream into flights.");
 
 /* 3 --------------------------------------------- motivation + question */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Problem" });
 s.addText("Why the standard time-gap rule is not enough", { placeholder: "title" });
-y = lead(s, "The usual rule splits a flight whenever two consecutive observations are more than thirty minutes apart. It looks only at elapsed time, never at the motion those two observations imply.");
+y = lead(s, "The usual rule splits a flight when two consecutive observations are more than 30 minutes apart. The rule reads elapsed time only. It ignores the motion that the two observations imply.");
 y = cardRow(s, y, [
   { fill: WARM, headColor: ORANGE, head: "A long gap is not always a new flight",
-    body: "An aircraft parked forty minutes between legs and an aircraft that loses receiver coverage for forty minutes while cruising produce an identical gap. The rule splits both. One of those splits is wrong." },
+    body: "Two aircraft give the same 40-minute gap. The first one parks between legs. The second one cruises, but loses receiver coverage. The rule splits both. One split is wrong." },
   { fill: WARM, headColor: ORANGE, head: "A short gap is not always continuous",
-    body: "Two reports three seconds apart implying a 200 km jump are physically impossible and almost certainly corrupt. The rule accepts them, because the time gap is small." },
+    body: "Two reports three seconds apart imply a 200 km jump. That motion is impossible, so one report is corrupt. The rule accepts both, because the time gap is small." },
 ]);
 s.addShape(pres.ShapeType.roundRect, { x: X, y: y + 0.1, w: W, h: 1.25, rectRadius: 0.06,
   fill: { color: NAVY }, line: { color: NAVY, width: 0 }, objectName: "rq-bg" });
@@ -367,7 +373,7 @@ s.addText([
     options: { fontSize: 16.5, color: WHITE, italic: true } },
 ], { x: X + 0.3, y: y + 0.24, w: W - 0.6, h: 0.98, isTextBox: true, margin: 0,
      lineSpacingMultiple: 1.18, objectName: "rq" });
-footnote(s, ["Resolution: kinematics address both cases, since speed, heading change, altitude rate and turn rate decide whether the implied motion is achievable for the aircraft class."]);
+footnote(s, ["Resolution: kinematics correct both cases. Speed, heading change, altitude rate and turn rate show if the aircraft class permits the implied motion."]);
 
 /* 4 ------------------------------------------------ goals and targets */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Problem" });
@@ -394,16 +400,16 @@ bullets(s, [
   "Robustness to missing, duplicated and out-of-order data",
 ], { x: colR, y: TOP + 0.34, w: colW, fontSize: 14.5 });
 
-const fnTop4 = footnote(s, ["Constraints: every stage is reproducible under a fixed seed, and every schema or parameter change is recorded in an append-only decision log."]);
+const fnTop4 = footnote(s, ["Constraints: a fixed seed makes every stage reproducible. An append-only decision log records each schema change and each parameter change."]);
 const c4 = { fill: PALE, head: "Target 5 drove the architecture",
-  body: "Scaling efficiency asks whether cost grows with new data or with accumulated data. A pipeline that rebuilds everything each run costs the square of the dataset, and no per-stage optimisation fixes that. Everything in the next section follows from this." };
+  body: "Scaling efficiency asks one question. Does cost grow with the new data, or with the total data? A pipeline that rebuilds all data on each run costs the square of the dataset. No per-stage optimisation corrects this. The next section follows from this target." };
 cardAt(s, c4, colR, fnTop4 - 0.2 - cardHeight(c4, colW), colW);
 
 /* 5 -------------------------------------------------------- architecture */
 pres.addSection({ title: "Approach" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Pipeline architecture", { placeholder: "title" });
-y = lead(s, "Seven stages in a linear flow. Each tier persists its output, so a downstream tier can be rebuilt without re-running the work above it.");
+y = lead(s, "Seven stages in a linear flow. Each tier writes its output to disk. A downstream tier therefore rebuilds without a repeat of the work above it.");
 
 const tiers = [
   { t: "OpenSky Network", d: "monthly archives\nlive REST feed\ndaily state archives", c: "F0F2F5", tc: BODY },
@@ -428,15 +434,15 @@ tiers.forEach((tr, i) => {
       color: RULE, isTextBox: true, margin: 0, align: "center", objectName: "arrow" + i });
   }
 });
-const fnTop5 = footnote(s, ["Deployment: nine services under Docker Compose on one workstation; the Spark cluster runs one master and two workers."]);
+const fnTop5 = footnote(s, ["Deployment: Docker Compose runs nine services on one workstation. The Spark cluster has one master and two workers."]);
 cardAt(s, { fill: GREY, head: "Why three tiers rather than one",
-  body: "The dominant cost in this pipeline is repeated work. With a single tier, every schema change forces a fresh pull from OpenSky, which is rate-limited and intermittently unavailable, and every metric change forces a fresh cleaning pass, the most CPU-intensive stage. Separate tiers decouple both." },
+  body: "Repeated work is the largest cost in this pipeline. A single tier has two penalties. Each schema change forces a new pull from OpenSky, and OpenSky limits the request rate. Each metric change forces a new cleaning pass, the most expensive stage. Separate tiers remove both penalties." },
   X, y + tierH + 0.24, W, fnTop5 - (y + tierH + 0.24) - 0.18);
 
 /* 6 ------------------------------------------------------- data vault 2.0 */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
-s.addText("Silver tier modelled as a Data Vault 2.0", { placeholder: "title" });
-y = lead(s, "Hubs hold identity, links hold relationships, satellites hold attributes and are insertion-only.");
+s.addText("The silver tier uses a Data Vault 2.0 model", { placeholder: "title" });
+y = lead(s, "Hubs hold identity. Links hold relationships. Satellites hold attributes, and take new rows only.");
 
 const TBLW = 6.30;
 s.addTable(tableRows([
@@ -455,57 +461,58 @@ s.addTable(tableRows([
     objectName: "vault-table" });
 
 const RX = X + TBLW + 0.3, RW = W - TBLW - 0.3;
-const fnTop6 = footnote(s, ["Keys: the flight hub is keyed on callsign and date, not airframe, because one airframe flies several distinct flights in a day. Hash keys replace natural keys in all joins."]);
+const fnTop6 = footnote(s, ["Keys: the flight hub uses callsign and date, not airframe, because one airframe flies several flights in a day. Hash keys replace natural keys in every join."]);
 fitColumn(s, [
   { head: "Multi-source reconciliation",
-    body: "Three sources observe the same aircraft. A hub row is created once per key, so later observations attach to it instead of duplicating." },
+    body: "Three sources observe the same aircraft. The builder creates one hub row for each key. A later observation attaches to that row." },
   { head: "Additive schema evolution",
-    body: "New attributes arrive as new satellites on an existing hub, so no existing table is altered and a schema change cannot break a stage." },
+    body: "A new attribute arrives as a new satellite on an existing hub. No existing table changes, so a schema change does not break a stage." },
   { head: "Per-source lineage",
-    body: "Every row records which ingest path produced it and when. Without it, no tier could be replayed in isolation." },
+    body: "Every row records its ingest path and its load time. Without this record, no tier replays on its own." },
 ], RX, y, RW, fnTop6 - 0.18);
-s.addNotes("Four lineage columns on every row: hash of the business key, load timestamp, record-source tag, partition month. Satellites are never updated in place, because an update destroys the history the load timestamp exists to record.");
+s.addNotes("Every row has four lineage columns: business-key hash, load timestamp, record-source tag, and partition month. The builder never updates a satellite in place. An update destroys the history that the load timestamp records.");
 
 /* 7 ----------------------------------------------- partitioning decision */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Monthly partitions made scaling measurable", { placeholder: "title" });
-y = lead(s, "Every time-sensitive table is partitioned by calendar month. A watermark registry records the last month written per tier and per table, and advances inside the same transaction as the write it describes.");
+y = lead(s, "Each time-sensitive table uses the calendar month as its partition. A watermark registry records the last month for each tier and each table. The registry advances in the same transaction as the write.");
 y = cardRow(s, y, [
   { fill: WARM, headColor: ORANGE, head: "Before: full rebuild",
-    body: "Every tier below bronze rebuilt completely on each run, so N months of data cost the sum of 1 through N months of work. Scaling efficiency cannot be measured on such a pipeline: wall time against volume measures rework. A scale-out attempt also exhausted the disk at roughly 20 GB of transient files." },
+    body: "Each run rebuilt every tier below bronze. N months of data therefore cost the sum of 1 to N months of work. This pipeline hides scaling efficiency, because wall time against volume shows rework only. A scale-out attempt also filled the disk with about 20 GB of temporary files." },
   { fill: PALE, head: "After: incremental refresh",
-    body: "Adding one month processes one month. Partitions are written to a temporary path, flushed, then renamed into place, so a concurrent reader sees the complete old partition or the complete new one. A completion marker lets an interrupted run resume at a partition boundary." },
+    body: "One added month costs one month of work. The writer puts a partition in a temporary path, flushes it, then renames it into place. A parallel reader therefore sees the complete old partition or the complete new one. A completion marker restarts a stopped run at a partition boundary." },
 ]);
 statRow(s, y, [
-  { value: "131 s", label: "to commit the second added month, from partition-commit markers" },
-  { value: "148 s", label: "to commit the third added month: the same order, not growing" },
+  { value: "131 s", label: "to commit the second added month, from the partition-commit markers" },
+  { value: "148 s", label: "to commit the third added month: the same order, with no growth" },
   { value: "linear", color: GREEN, label: "cost in data volume with a fixed setup term, in place of quadratic" },
 ], { size: 32 });
-footnote(s, ["Setup: 1031 s warehouse build for three months of flight records. Month one additionally carries a one-time global build of the aircraft hub, identity satellite and global flight-to-aircraft link, occupying eleven minutes of that run."]);
+footnote(s, ["Setup: the warehouse build took 1031 s for three months of flight records. Month one also carries one global build of the aircraft hub, the identity satellite and the global flight-to-aircraft link. That global build took 11 minutes of the run."]);
 
 /* 8 ------------------------------------------------------------- kafka */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Streaming ingest through Kafka", { placeholder: "title" });
-y = lead(s, "Kafka buffers the live feed between the OpenSky REST API and the bronze tier. It was chosen over a task-queue broker, which optimises for acknowledgement rather than replayable streams, and over writing straight to storage.");
+const fnTop8 = footnote(s, ["Dead-letter policy: the producer diverts a record with a malformed array shape, and a record that fails to serialise, and it keeps the failure reason. The producer retries a failed poll on the next interval, so a short outage costs one window, not the run."]);
+y = lead(s, "Kafka buffers the live feed between the OpenSky REST API and the bronze tier. A task-queue broker optimises acknowledgement, not replayable streams.");
 y = cardRow(s, y, [
-  { head: "Topics and partitioning",
-    body: "The raw topic has three partitions, matching the three consumer workers. The dead-letter topic has one, since it is written rarely and keeps global ordering for failure analysis." },
-  { head: "Key is the airframe identifier",
-    body: "All observations of one aircraft land on the same partition and are consumed in order. Without this, two consumers could write one aircraft out of order, corrupting the load-timestamp ordering that deduplication depends on." },
-  { head: "At-least-once, deliberately",
-    body: "Offsets commit only after a batch reaches storage. A crash replays the uncommitted window and silver absorbs the duplicates. Exactly-once was rejected: it solves a problem the data model already solves." },
+  { head: "Topics and partitions",
+    body: "The raw topic has three partitions, one for each consumer worker. The dead-letter topic has one. It takes few writes, and one partition keeps global order for failure analysis." },
+  { head: "The key is the airframe identifier",
+    body: "Every observation of one aircraft goes to the same partition, and one consumer reads them in order. Without this key, two consumers corrupt the load-timestamp order that deduplication needs." },
+  { head: "At-least-once, by decision",
+    body: "The consumer commits offsets after a batch reaches storage. A crash replays the open window, and silver absorbs the duplicates. Exactly-once delivery solves a problem that the data model solves already." },
 ]);
 cardRow(s, y, [
-  { fill: GREY, head: "All seventeen source fields published unmodified",
-    body: "Projecting at ingest makes the raw record unrecoverable if a later stage needs a dropped field. Projection happens downstream, in the cleaning stage, never in the producer." },
-  { fill: GREY, head: "Instrumented at the producer",
-    body: "OAuth2 credentials refresh thirty seconds before expiry so a long-running producer never stalls mid-poll. Three metrics are scraped: records published, records dead-lettered by reason, and publish latency." },
-]);
-footnote(s, ["Dead-letter policy: a record whose array shape is malformed, or that fails to serialise, is diverted with its failure reason rather than dropped silently. A failed poll of the source API is retried on the next interval, so a transient outage costs one window and not the run."]);
+  { fill: GREY, head: "The producer publishes all 17 source fields",
+    body: "A projection at ingest loses the raw record. A later stage then has no way to read a field that the projection dropped. The clean stage does the projection instead." },
+  { fill: GREY, head: "The producer reports three metrics",
+    body: "The OAuth2 token refreshes 30 seconds before it expires, so a long run never stops in mid-poll. Prometheus scrapes three metrics: records published, records sent to the dead-letter topic by reason, and publish latency." },
+], { bottom: fnTop8 - 0.18 });
+s.addNotes("A direct write from the API to storage was the other option. It couples the poll rate to the write rate, and it loses data whenever the write path stalls. Kafka removes both faults.");
 
 /* 9 --------------------------------------------------- platform stack */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
-s.addText("Big data platforms used, and why each was chosen", { placeholder: "title" });
+s.addText("Big data platforms, and the reason for each one", { placeholder: "title" });
 y = lead(s, "What each platform does in the pipeline, and the property that decided it.");
 s.addTable(tableRows([
   ["Platform", "Role in the pipeline", "Why this one"],
@@ -514,64 +521,64 @@ s.addTable(tableRows([
   ["PostgreSQL", "Telemetry, per-metric results, watermark registry, dashboard tables",
    "Constraints reject an invalid watermark at the storage boundary, not in caller code"],
   ["Prometheus + Grafana", "Scrapes Spark, host and producer metrics; eight dashboard panels",
-   "The measurement surface the six performance targets map onto directly"],
+   "The six performance targets map onto counters, histograms and gauges"],
   ["Apache Airflow", "Schedules the streaming path, branches live against batch, retries",
-   "The batch path keeps a dedicated script, simpler to instrument per stage"],
+   "A dedicated script runs the batch path, because a script is simpler to time per stage"],
   ["Great Expectations", "25 expectations across 5 suites at the bronze and mart boundaries",
-   "Declarative, and a failure blocks promotion of the affected table"],
+   "The suites are declarative, and one failure blocks promotion of that table"],
   ["Apache Parquet", "Columnar storage with a dataset abstraction",
-   "Partition predicates push into file listing; explicit types stop hex ids parsing as integers"],
+   "Partition predicates push into file listing; an explicit type keeps a hex id a string"],
   ["Docker Compose", "Runs the nine-service stack on one host",
-   "The target is a single workstation, where a cluster control plane adds cost only"],
+   "The target is one workstation, where a cluster control plane adds cost only"],
 ], { size: 11.5, headSize: 11.5 }),
   { x: X, y: y, w: W, colW: [1.70, 4.35, 5.88], rowH: 0.40,
     border: { type: "solid", color: "E3E7EC", pt: 1 }, margin: [2, 7, 2, 7],
     objectName: "platform-table" });
-footnote(s, ["Kafka is covered on the previous slide. Schema convergence happens in one projection function, so the three source schemas meet the canonical schema in a single place rather than in each reconstruction method."]);
-s.addNotes("Airflow orchestrates the streaming path; the batch path used for the Section 3 measurements runs under a dedicated script because per-stage timing is easier to instrument there.");
+footnote(s, ["The previous slide covers Kafka. One projection function does the schema convergence, so the three source schemas meet the canonical schema in one place."]);
+s.addNotes("Airflow orchestrates the streaming path. A dedicated script runs the batch path for the Section 3 measurements, because per-stage timing is simpler to instrument in a script.");
 
 /* 10 ----------------------------------------------------- three methods */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
-s.addText("Three reconstruction methods spanning a cost range", { placeholder: "title" });
-y = lead(s, "Three rather than two, because a cost-accuracy curve needs enough points to show its shape, and the three correspond to distinct families in the aviation literature.");
+s.addText("Three reconstruction methods across a cost range", { placeholder: "title" });
+y = lead(s, "The project implements three methods, not two. A cost-accuracy curve needs three points to show its shape. The three methods also match three families in the aviation literature.");
 y = cardRow(s, y, [
   { fill: "F0F2F5", head: "METHOD A\nTime-gap baseline",
-    body: "Observations group into one flight until the gap exceeds 1800 seconds, following published OpenSky practice for commercial operations. It evaluates no kinematic features, which makes it a clean reference point." },
+    body: "Observations group into one flight until the gap exceeds 1800 seconds. This threshold follows OpenSky practice for commercial operations. The method reads no kinematic feature, so it gives a clean reference point." },
   { fill: PALE, head: "METHOD B\nKinematic segmentation",
-    body: "A rule over five features between consecutive observations: speed change, heading change, altitude rate, turn rate, callsign change. A break is declared when any exceeds a limit physically implausible for the aircraft class." },
+    body: "A rule reads five features between consecutive observations: speed change, heading change, altitude rate, turn rate, and callsign change. The rule declares a break when one feature exceeds the limit for the aircraft class." },
   { fill: "FBEDE6", headColor: ORANGE, head: "METHOD C\nKinematic with Kalman smoothing",
-    body: "The same segmenter with the position-jump break disabled, then a six-state constant-velocity Kalman filter per flight in a local East-North-Up frame, with a chi-squared innovation gate on the residual." },
+    body: "The same segmenter runs with the position-jump break off. A six-state constant-velocity Kalman filter then runs for each flight in a local East-North-Up frame. A chi-squared gate tests the residual." },
 ]);
 cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0",
   head: "The design decision at the centre of Method C",
-  body: "The jump rule and the filter's innovation gate treat the same situation, an observation whose implied motion is impossible, and resolve it differently: the rule starts a new flight, the gate down-weights a corrupt measurement. Only one can act on a given row. Method C disables the rule and lets the gate decide. The results say which is right." },
+  body: "The jump rule and the innovation gate treat the same condition: an observation with impossible implied motion. They differ in the result. The rule starts a new flight. The gate gives a corrupt measurement a lower weight. Only one of the two acts on a row, so Method C turns the rule off. The measurements show which choice is correct." },
   X, y, W);
-s.addNotes("Constant velocity was chosen over constant-acceleration and coordinated-turn models: higher-order models need more observations per segment to converge, and the research question is what a smoother adds, which the simplest filter isolates.");
+s.addNotes("The project uses a constant-velocity model, not a constant-acceleration or coordinated-turn model. A higher-order model needs more observations in each segment. The research question asks what a smoother adds, and the simplest filter isolates that contribution.");
 
 /* 11 ----------------------------------------------------- noise + design */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Noise ladder and experiment design", { placeholder: "title" });
-y = lead(s, "Real ADS-B carries no ground truth, so absolute position error cannot be measured against it. Four cumulative profiles degrade synthetic trajectories whose truth is known.");
+const fnTop11 = footnote(s, [
+  "Design: 3 methods by 4 profiles gives 12 cells. Each cell runs against both inputs, with seed 42. A uniqueness constraint makes a repeat run idempotent, so every figure traces to one execution.",
+  "Six metrics per cell: segmentation precision, recall and F1 within a 5 s tolerance; boundary time error; trajectory continuity; coverage; position RMSE; deviation-detection precision, recall and F1.",
+]);
+y = lead(s, "Real ADS-B has no ground truth, so absolute position error needs a synthetic input. Four cumulative profiles degrade synthetic trajectories with known truth.");
 y = cardRow(s, y, [
   { fill: "F0F2F5", head: "N0   Clean",
-    body: "No modification. Establishes the correctness floor: a method that misses near-zero error here is broken, and the matrix must detect that." },
+    body: "No modification. This profile sets the correctness floor. A correct method reaches near-zero error here." },
   { fill: "EDF1F6", head: "N1   Gaussian jitter",
-    body: "Position and altitude jitter, approximating GPS multipath, receiver clock skew and atmospheric refraction." },
+    body: "Jitter on position and altitude. It approximates GPS multipath, receiver clock skew and refraction." },
   { fill: "F5EDE8", headColor: ORANGE, head: "N2   Plus 10% message loss",
-    body: "Receiver loss-of-signal. Stresses continuity and coverage: a gap-aware method must interpolate, not declare a false break." },
+    body: "Receiver loss of signal. This profile tests continuity and coverage. A gap-aware method declares no false break." },
   { fill: "FBEDE6", headColor: ORANGE, head: "N3   Plus 10% reordering",
-    body: "Two receivers forwarding one observation at different times. Tests whether event-time ordering survives scrambled arrival order." },
+    body: "Two receivers send one observation at different times. This profile tests event-time order." },
 ]);
 cardRow(s, y, [
   { fill: PALE, head: "Input 1: synthetic, known truth",
-    body: "40 flights and 10 injected deviations per cell. Answers the accuracy half of the question, since absolute position error and exact flight counts are measurable." },
+    body: "40 flights and 10 injected deviations per cell. It answers the accuracy half, because position error and flight count are measurable." },
   { fill: PALE, head: "Input 2: real OpenSky, 4,361,653 rows per cell",
-    body: "No truth, but operational volume. Answers the cost half, and stops cost figures from a small truth-bearing sample being presented as scalability evidence." },
-]);
-footnote(s, [
-  "Design: 3 methods by 4 profiles is 12 cells, run against both inputs, seed fixed at 42. Re-execution is idempotent under a uniqueness constraint, so every figure traces to one execution.",
-  "Six metrics per cell: segmentation precision, recall and F1 within a 5 s tolerance; boundary time error; trajectory continuity; coverage; position RMSE; deviation-detection precision, recall and F1.",
-]);
+    body: "No truth, but operational volume. This input answers the cost half. It also keeps a small sample out of the role of scalability evidence." },
+], { bottom: fnTop11 - 0.18 });
 
 /* 12 ---------------------------------------------- RESULTS section divider */
 pres.addSection({ title: "Results" });
@@ -585,8 +592,8 @@ s.addText("Accuracy on synthetic input with known truth, cost on 4.36 million re
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Accuracy against computational cost", { placeholder: "title" });
 const fnTop12 = footnote(s, [
-  "Setup: synthetic input, 14,400 observations per cell, truth 40 flights; wall time is per cell on the deployment host; the shaded band marks RMSE at or below 0.001 m.",
-  "Result: time-gap and kinematic coincide in error at every profile and separate only in cost. The smoothed method costs an order of magnitude more and, except at N2, lands below the measurable error floor.",
+  "Setup: synthetic input, 14,400 observations per cell, truth 40 flights. Wall time is per cell on the deployment host. The shaded band marks RMSE at or below 0.001 m.",
+  "Result: time-gap and kinematic give the same error at every profile, and they differ in cost only. The smoothed method costs an order of magnitude more. At N0, N1 and N3 its error falls below the measurable floor.",
 ]);
 const imgH = fnTop12 - TOP - 0.22, imgW = imgH * (6.4 / 4.0);
 s.addImage({ path: path.join(FIG, "fig1_accuracy_cost.png"),
@@ -595,7 +602,7 @@ s.addImage({ path: path.join(FIG, "fig1_accuracy_cost.png"),
 /* 14 --------------------------------------------------- over-fragmentation */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Kinematic segmentation over-fragments flights", { placeholder: "title" });
-const fnTop13 = footnote(s, ["Result: the Kalman-smoothed method holds a stable 18,458 to 18,913 flights across all four profiles, close to the baseline's 14,948."]);
+const fnTop13 = footnote(s, ["Result: the Kalman-smoothed method holds 18,458 to 18,913 flights across the four profiles. The baseline gives 14,948."]);
 s.addChart([{
   type: pres.ChartType.bar,
   data: [
@@ -614,17 +621,17 @@ s.addChart([{
 }));
 fitColumn(s, [
   { fill: WARM, headColor: ORANGE, head: "Worse on real data than on synthetic",
-    body: "On synthetic input it finds the true 40 flights when clean, then 68, 175 and 285 as noise rises. On real data it fragments even at N0: 102,169 against the baseline's 14,949." },
+    body: "On clean synthetic input the rule finds the true 40 flights. It then gives 68, 175 and 285 as noise rises. On real data it fragments at N0 already: 102,169 flights against 14,949 for the baseline." },
   { fill: GREY, head: "Why",
-    body: "Natural receiver coverage gaps present to the rule exactly as injected noise does. The rule behaves correctly; the input is the problem." },
+    body: "A natural gap in receiver coverage looks the same to the rule as injected noise. The rule operates correctly. The input causes the result." },
   { fill: GREY, head: "It costs the deviation metric too",
-    body: "Deviation detection collapses to 2 flags against 10 injected events at N2: the fragments are too short to contain one." },
+    body: "At N2 the method flags 2 events against 10 injected events. Each fragment is too short to hold one deviation." },
 ], X + 6.9, TOP, W - 6.9, fnTop13 - 0.18);
 
 /* 15 ------------------------------------------------------- cost at scale */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Cost and throughput at operational volume", { placeholder: "title" });
-const fnTop14 = footnote(s, ["Setup: 4,361,653 real OpenSky state vectors per cell on the deployment host. Real input carries no ground truth, so this slide reports cost only."]);
+const fnTop14 = footnote(s, ["Setup: each cell uses 4,361,653 real OpenSky state vectors on the deployment host. Real input has no ground truth, so this slide reports cost only."]);
 s.addChart([{
   type: pres.ChartType.bar,
   data: [
@@ -652,16 +659,16 @@ s.addTable(tableRows([
     objectName: "tput-table" });
 fitColumn(s, [
   { head: "The two methods scale differently in noise",
-    body: "Baseline throughput is flat. Kinematic throughput falls from 21,670 to 13,958 as noise rises, because its cost is driven by the number of segments it creates and that number grows." },
-  { head: "The smoother is flat to slightly rising",
-    body: "12,331 to 13,490 records per second, because its cost is dominated by filtering observations and heavier profiles drop observations." },
+    body: "Baseline throughput stays flat. Kinematic throughput falls from 21,670 to 13,958 as noise rises. The segment count drives its cost, and that count grows." },
+  { head: "The smoother stays flat",
+    body: "12,331 to 13,490 records each second. The filter step dominates its cost, and a heavier profile drops observations." },
 ], X + 6.9, TOP + 1.55, W - 6.9, fnTop14 - 0.18);
 
 /* 16 ------------------------------------------------------ accuracy matrix */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("The twelve-cell accuracy matrix", { placeholder: "title" });
-const fnTop15 = footnote(s, ["Truth: 40 flights and 10 injected deviations per cell.",
-  "Caveat: the synthetic generator uses the same constant-velocity model the filter assumes, so sub-millimetre recovery is an upper bound on what the filter achieves against real manoeuvring aircraft."]);
+const fnTop15 = footnote(s, ["Truth: each cell has 40 flights and 10 injected deviations.",
+  "Caveat: the synthetic generator uses the same constant-velocity model as the filter. Sub-millimetre recovery is therefore an upper bound for a real aircraft in a manoeuvre."]);
 const MTW = 6.90;
 s.addTable(tableRows([
   ["Method", "Noise", "Wall (s)", "RMSE (m)", "Flights", "Deviations"],
@@ -692,18 +699,18 @@ s.addTable(tableRows([
 
 const MX = X + MTW + 0.3, MW = W - MTW - 0.3;
 fitColumn(s, [
-  { head: "Segmentation and estimation are separable",
-    body: "Time-gap and kinematic report identical RMSE at every profile. Neither imputes a position, so accuracy comes from estimation, not better boundaries." },
+  { head: "Segmentation and estimation separate",
+    body: "Time-gap and kinematic report the same RMSE at every profile. Neither estimates a position, so accuracy comes from estimation, not from boundaries." },
   { fill: MINT, headColor: GREEN, head: "The gate beats the rule",
-    body: "Method C holds the flight count at truth under every profile, where the jump rule fragmented into 285 at N3." },
-  { fill: WARM, headColor: RED, head: "One cell needs explaining",
-    body: "The N2 smoothed cell drifts because its gate, tuned on N1 residuals, rejects valid N2 measurements. One threshold value." },
+    body: "Method C holds the flight count at truth in every profile. The jump rule gave 285 flights at N3." },
+  { fill: WARM, headColor: RED, head: "One cell needs an explanation",
+    body: "The N2 smoothed cell drifts. Its gate threshold comes from N1 residuals, and rejects valid N2 measurements. One value causes the fault." },
 ], MX, TOP, MW, fnTop15 - 0.10, 0.15);
 
 /* 17 -------------------------------------------- six performance targets */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("The six performance targets, instrumented and measured", { placeholder: "title" });
-y = lead(s, "Each target was given an instrument before it was measured. Two are read as dashboard series rather than reduced to a single number.");
+y = lead(s, "The project gave each target an instrument first, then took the measurement. Two targets read as a dashboard series, not as a single number.");
 s.addTable(tableRows([
   ["Target", "Instrumentation", "Measured result"],
   ["Throughput", "Per-cell row counts and wall time; producer counter scraped continuously",
@@ -724,29 +731,29 @@ s.addTable(tableRows([
     border: { type: "solid", color: "E3E7EC", pt: 1 }, margin: [2, 7, 2, 7],
     objectName: "targets-table" });
 footnote(s, [
-  "Downstream detail: of the 112.2 s, 70.5 s writes three mart partitions and rebuilds the dimensions, 27.4 s validates data quality, 13.3 s runs the twelve-cell matrix, 0.8 s refreshes the evaluation store.",
-  "Scaling efficiency is the target that shaped the architecture: partition-commit markers make the marginal cost of an added month a direct measurement rather than an average over the whole run.",
+  "Downstream detail: of the 112.2 s, the marts take 70.5 s and data quality takes 27.4 s. The matrix takes 13.3 s, and the evaluation store 0.8 s.",
+  "Scaling efficiency shaped the architecture. The partition-commit markers make the marginal cost of an added month a direct measurement, not an average over the whole run.",
 ]);
-s.addNotes("The two dashboard rows are the honest answer: latency and resource utilisation are instrumented and visible as series, but neither is reduced to one headline number. Shuffle is zero on the single-host path by construction rather than by optimisation, which is why that row reads as it does.");
+s.addNotes("Two rows point to a dashboard. Latency and resource use have instruments, and both appear as a series, but neither gives one headline number. The single-host path makes no shuffle by construction, not by optimisation.");
 
 /* 18 ------------------------------------------------------------ delivery */
 pres.addSection({ title: "Summary" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
-s.addText("What was delivered against the proposal", { placeholder: "title" });
-y = lead(s, "All seven design goals and all six performance targets were delivered and measured on the deployed system.");
+s.addText("Delivery against the proposal", { placeholder: "title" });
+y = lead(s, "The deployed system meets all seven design goals and all six performance targets.");
 y = statRow(s, y, [
-  { value: "14.1 GB", label: "raw ingested, 121.6 M records across 48 months of archives" },
+  { value: "14.1 GB", label: "raw data, 121.6 M records across 48 months of archives" },
   { value: "244.5 M", label: "warehouse rows written: 225.5 M silver, 19.0 M gold" },
-  { value: "12 / 12", label: "experiment cells populated, on each of the two inputs" },
+  { value: "12 / 12", label: "experiment cells complete, on each of the two inputs" },
   { value: "6x", label: "cost of the smoother over the baseline at operational volume" },
 ], { size: 28, fill: PALE, color: NAVY });
 statRow(s, y, [
-  { value: "92 / 92", label: "automated tests passing, in 8.25 seconds" },
-  { value: "25 / 25", label: "data-quality expectations passing across five suites" },
-  { value: "7 / 7", label: "rollback scenarios passing, downstream-first ordering verified" },
-  { value: "17x", label: "speedup from vectorising cross-track distance, the largest win" },
+  { value: "92 / 92", label: "automated tests pass, in 8.25 seconds" },
+  { value: "25 / 25", label: "data-quality expectations pass, across five suites" },
+  { value: "7 / 7", label: "rollback scenarios pass, in downstream-first order" },
+  { value: "17x", label: "speedup from the vectorised cross-track distance, the largest gain" },
 ], { size: 28, fill: GREY, color: BODY });
-footnote(s, ["Verification: three cross-tier identity checks hold exactly, confirming no rows lost or duplicated between silver and gold. Determinism was checked by byte-level hash equality on every output partition across two runs."]);
+footnote(s, ["Verification: three cross-tier identity checks hold exactly. Silver and gold therefore lose no row and duplicate no row. A byte-level hash of every output partition matched across two runs."]);
 
 /* 19 ------------------------------------------------------------- answer */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
@@ -758,27 +765,27 @@ s.addText("How much accuracy is gained by incorporating aircraft kinematics, and
     isTextBox: true, margin: 0, lineSpacingMultiple: 1.18, objectName: "q" });
 y = cardRow(s, TOP + 1.04, [
   { fill: WARM, headColor: ORANGE, head: "Kinematic segmentation alone gains nothing",
-    body: "Identical position error to the baseline at every profile, because neither estimates positions. Under noise it is worse at the task it was meant to improve, splitting 40 true flights into 285, and it fragments real data with no injected noise at all." },
+    body: "The method gives the same position error as the baseline at every profile, because neither method estimates a position. Under noise it is worse at its own task: it splits 40 true flights into 285. On real data it fragments with no injected noise." },
   { fill: MINT, headColor: GREEN, head: "The gain comes from the estimator",
-    body: "The Kalman filter cuts position error from kilometres to below a millimetre. By treating an implausible observation as a corrupt measurement rather than a flight boundary, it also holds the flight count at truth where the rule alone fragmented it sevenfold." },
+    body: "The Kalman filter cuts position error from kilometres to below a millimetre. It treats an implausible observation as a corrupt measurement, not as a flight boundary. It therefore holds the flight count at truth, where the rule alone fragmented it sevenfold." },
   { fill: PALE, head: "The cost is about six times the baseline",
-    body: "On 4.36 million real observations: 5.8 to 6.2 times the baseline wall time, and 7.4 to 9.2 times on the smaller synthetic input. The smoother joins the frontier at N1 and N3; at N0 and N2 the baseline holds it alone, and kinematic segmentation is dominated at every profile." },
+    body: "On 4.36 million real observations the smoother costs 5.8 to 6.2 times the baseline wall time. On the smaller synthetic input it costs 7.4 to 9.2 times. The smoother joins the frontier at N1 and N3. At N0 and N2 the baseline holds the frontier alone, and the other two methods dominate kinematic segmentation everywhere." },
 ]);
 cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0", head: "The practical reading",
-  body: "Worth the cost when the trajectory itself is the object of analysis; not worth it when only flight boundaries are required, since the baseline serves those at a sixth of the cost. This is a sharper answer than the proposal anticipated, because it attributes the gain to estimation rather than to kinematic reasoning in general." },
+  body: "The cost is worthwhile when the trajectory itself is the object of analysis. It is not worthwhile when the work needs flight boundaries only, because the baseline gives those at a sixth of the cost. This answer is sharper than the proposal expected: the gain comes from estimation, not from kinematics in general." },
   X, y, W);
 
 /* 20 ------------------------------------------------------- future work */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("Where this goes next", { placeholder: "title" });
-y = lead(s, "Three extensions, in order of how little they change the delivered system.");
+y = lead(s, "Three extensions, in order of how little each one changes the delivered system.");
 const nexts = [
-  { n: "1", t: "Promote the remaining builders to Spark",
-    b: "The monthly partition contract and watermark semantics are engine-independent, so extending Spark execution from the state-observation satellite to the flight-record builders is a substitution of engine, not a redesign. It moves the last single-host processing onto the cluster." },
+  { n: "1", t: "Move the remaining builders to Spark",
+    b: "The monthly partition contract and the watermark semantics are engine-independent. A move of Spark execution from the state-observation satellite to the flight-record builders changes the engine only. It is not a redesign. It also puts the last single-host work on the cluster." },
   { n: "2", t: "Run the full 48-month archive",
-    b: "At the measured marginal cost of 131 to 148 seconds per month, materialising the whole archive gives the accuracy-cost frontier its full historical depth, including seasonal variation in traffic density." },
+    b: "The marginal cost is 131 to 148 seconds for each month. A run over the whole archive gives the accuracy-cost frontier its full historical depth. It also shows the seasonal change in traffic density." },
   { n: "3", t: "Adopt a managed table format",
-    b: "Apache Iceberg or Delta Lake would add snapshot isolation and time-travel queries in place of the custom watermark implementation. The current implementation mirrors their semantics closely enough that this is a substitution rather than a rewrite." },
+    b: "Apache Iceberg or Delta Lake adds snapshot isolation and time-travel queries, and replaces the custom watermark code. The current code follows the same semantics, so this change is a substitution, not a rewrite." },
 ];
 nexts.forEach((nx) => {
   const tw = W - 0.95;
@@ -794,7 +801,7 @@ nexts.forEach((nx) => {
     isTextBox: true, margin: 0, lineSpacingMultiple: 1.2, objectName: nm("nb") });
   y += th + bh + 0.46;
 });
-footnote(s, ["Accompanying the deck: source code, 92 automated tests, eight Grafana dashboards, the append-only decision log and the reproducibility fixtures."]);
+footnote(s, ["The deck has these attachments: source code, 92 automated tests, eight Grafana dashboards, the append-only decision log, and the reproducibility fixtures."]);
 
 /* --------------------------------------------------------------- write */
 const OUT = process.env.DECK_OUT || "B:/IISC/DE/Proj/etl4/docs/ETL4_Project_Presentation.pptx";
