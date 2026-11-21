@@ -501,22 +501,20 @@ cardRow(s, y, [
   { fill: GREY, head: "Instrumented at the producer",
     body: "OAuth2 credentials refresh thirty seconds before expiry so a long-running producer never stalls mid-poll. Three metrics are scraped: records published, records dead-lettered by reason, and publish latency." },
 ]);
-footnote(s, ["Dead-letter policy: a record that fails to publish is retried once after a token refresh, then diverted with its failure reason rather than dropped."]);
+footnote(s, ["Dead-letter policy: a record whose array shape is malformed, or that fails to serialise, is diverted with its failure reason rather than dropped silently. A failed poll of the source API is retried on the next interval, so a transient outage costs one window and not the run."]);
 
 /* 9 --------------------------------------------------- platform stack */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Big data platforms used, and why each was chosen", { placeholder: "title" });
-y = lead(s, "What each platform does in the pipeline, and the reason it was preferred to the obvious alternative.");
+y = lead(s, "What each platform does in the pipeline, and the property that decided it.");
 s.addTable(tableRows([
   ["Platform", "Role in the pipeline", "Why this one"],
   ["Apache Spark", "Distributed build of the state-observation satellite",
    "The only table whose source volume exceeds single-host memory"],
   ["PostgreSQL", "Telemetry, per-metric results, watermark registry, dashboard tables",
    "Constraints reject an invalid watermark at the storage boundary, not in caller code"],
-  ["Prometheus", "Scrapes Spark, host and producer metrics",
-   "The six performance targets map onto counters, histograms and gauges directly"],
-  ["Grafana", "Eight dashboard panels over the evaluation store",
-   "Renders the accuracy against cost scatter from the same tables the report cites"],
+  ["Prometheus + Grafana", "Scrapes Spark, host and producer metrics; eight dashboard panels",
+   "The measurement surface the six performance targets map onto directly"],
   ["Apache Airflow", "Schedules the streaming path, branches live against batch, retries",
    "The batch path keeps a dedicated script, simpler to instrument per stage"],
   ["Great Expectations", "25 expectations across 5 suites at the bronze and mart boundaries",
@@ -705,30 +703,31 @@ fitColumn(s, [
 /* 17 -------------------------------------------- six performance targets */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("The six performance targets, instrumented and measured", { placeholder: "title" });
-y = lead(s, "Each proposal target was given an instrument first, so the result is a reading rather than an estimate.");
+y = lead(s, "Each target was given an instrument before it was measured. Two are read as dashboard series rather than reduced to a single number.");
 s.addTable(tableRows([
   ["Target", "Instrumentation", "Measured result"],
   ["Throughput", "Per-cell row counts and wall time; producer counter scraped continuously",
    "72,700 to 80,200 rec/s baseline;\n12,300 to 13,500 rec/s smoothed"],
-  ["End-to-end processing time", "Every stage prints and persists its elapsed time",
-   "1031 s warehouse build for 3 months;\n112.2 s downstream"],
-  ["Streaming latency", "Publish-latency histogram, 11 buckets from 1 ms to 5 s",
-   "Percentiles on the streaming dashboard"],
-  ["CPU and memory", "Host and container gauges scraped continuously",
+  ["End-to-end time and streaming latency",
+   "Every stage persists its elapsed time; publish-latency histogram, 11 buckets from 1 ms to 5 s",
+   "1031 s warehouse build for 3 months,\n112.2 s downstream; latency percentiles on the streaming dashboard"],
+  ["CPU and memory utilisation", "Host and container gauges scraped continuously",
    "Resource dashboard"],
-  ["Shuffle and partitioning", "Spark metrics endpoint reports shuffle bytes",
+  ["Shuffle and partitioning overhead", "Spark metrics endpoint reports shuffle bytes",
    "No shuffle on the single-host path, by construction"],
   ["Scaling efficiency", "Partition-commit timestamps, per month and per table",
    "131 s and 148 s for the second and third added month"],
+  ["Robustness", "The N0 to N3 ladder: missing, duplicated and out-of-order records, on both inputs",
+   "12 of 12 cells complete on each input"],
 ], { size: 11.5, headSize: 11.5 }),
-  { x: X, y: y, w: W, colW: [2.30, 5.18, 4.45], rowH: 0.44,
+  { x: X, y: y, w: W, colW: [2.30, 5.18, 4.45], rowH: 0.40,
     border: { type: "solid", color: "E3E7EC", pt: 1 }, margin: [2, 7, 2, 7],
     objectName: "targets-table" });
 footnote(s, [
   "Downstream detail: of the 112.2 s, 70.5 s writes three mart partitions and rebuilds the dimensions, 27.4 s validates data quality, 13.3 s runs the twelve-cell matrix, 0.8 s refreshes the evaluation store.",
-  "Robustness, the sixth proposal target, is demonstrated by the N0 to N3 ladder rather than by a single number: every method completes every profile without manual intervention.",
+  "Scaling efficiency is the target that shaped the architecture: partition-commit markers make the marginal cost of an added month a direct measurement rather than an average over the whole run.",
 ]);
-s.addNotes("Scaling efficiency is the target that drove the architecture. Partition-commit markers let it be measured directly instead of inferred from a total, which is why the marginal per-month cost is a measurement and not an average.");
+s.addNotes("The two dashboard rows are the honest answer: latency and resource utilisation are instrumented and visible as series, but neither is reduced to one headline number. Shuffle is zero on the single-host path by construction rather than by optimisation, which is why that row reads as it does.");
 
 /* 18 ------------------------------------------------------------ delivery */
 pres.addSection({ title: "Summary" });
@@ -763,7 +762,7 @@ y = cardRow(s, TOP + 1.04, [
   { fill: MINT, headColor: GREEN, head: "The gain comes from the estimator",
     body: "The Kalman filter cuts position error from kilometres to below a millimetre. By treating an implausible observation as a corrupt measurement rather than a flight boundary, it also holds the flight count at truth where the rule alone fragmented it sevenfold." },
   { fill: PALE, head: "The cost is about six times the baseline",
-    body: "On 4.36 million real observations: 5.8 to 6.2 times the baseline wall time, and 7.4 to 9.2 times on the smaller synthetic input. Within every profile the frontier holds the baseline and the smoother; kinematic segmentation is dominated." },
+    body: "On 4.36 million real observations: 5.8 to 6.2 times the baseline wall time, and 7.4 to 9.2 times on the smaller synthetic input. The smoother joins the frontier at N1 and N3; at N0 and N2 the baseline holds it alone, and kinematic segmentation is dominated at every profile." },
 ]);
 cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0", head: "The practical reading",
   body: "Worth the cost when the trajectory itself is the object of analysis; not worth it when only flight boundaries are required, since the baseline serves those at a sixth of the cost. This is a sharper answer than the proposal anticipated, because it attributes the gain to estimation rather than to kinematic reasoning in general." },
