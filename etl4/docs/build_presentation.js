@@ -373,7 +373,7 @@ s.addText([
     options: { fontSize: 16.5, color: WHITE, italic: true } },
 ], { x: X + 0.3, y: y + 0.24, w: W - 0.6, h: 0.98, isTextBox: true, margin: 0,
      lineSpacingMultiple: 1.18, objectName: "rq" });
-footnote(s, ["Resolution: kinematics correct both cases. Speed, heading change, altitude rate and turn rate show if the aircraft class permits the implied motion."]);
+footnote(s, ["Resolution: kinematics correct both cases. Speed, altitude rate and turn rate show whether the implied motion is physically possible."]);
 
 /* 4 ------------------------------------------------ goals and targets */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Problem" });
@@ -545,7 +545,7 @@ y = cardRow(s, y, [
   { fill: "F0F2F5", head: "METHOD A\nTime-gap baseline",
     body: "Observations group into one flight until the gap exceeds 1800 seconds. This threshold follows OpenSky practice for commercial operations. The method reads no kinematic feature, so it gives a clean reference point." },
   { fill: PALE, head: "METHOD B\nKinematic segmentation",
-    body: "A rule reads five features between consecutive observations: speed change, heading change, altitude rate, turn rate, and callsign change. The rule declares a break when one feature exceeds the limit for the aircraft class." },
+    body: "A rule breaks the flight on five signals:\ngap over 1,800 s\nposition-jump flag\naltitude rate over 50 m/s\nturn rate over 30 deg/s\ncallsign change in flight\nThe code fixes these thresholds. It does not derive them per aircraft type." },
   { fill: "FBEDE6", headColor: ORANGE, head: "METHOD C\nKinematic with Kalman smoothing",
     body: "The same segmenter runs with the position-jump break off. A six-state constant-velocity Kalman filter then runs for each flight in a local East-North-Up frame. A chi-squared gate tests the residual." },
 ]);
