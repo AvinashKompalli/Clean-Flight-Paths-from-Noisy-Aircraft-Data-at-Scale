@@ -347,7 +347,7 @@ cardRow(s, y, [
   { head: "2.  Find the boundaries",
     body: "Find where one flight ends and the next one starts. One airframe flies several flights in a day. The raw stream does not separate them." },
   { head: "3.  Repair the path",
-    body: "Make the trajectory continuous and physically possible. Some points are absent. Receivers that overlap duplicate other points. Some values are corrupt." },
+    body: "Make the trajectory continuous and physically possible. Some points are absent. Receivers that overlap send duplicate points, and some values are corrupt." },
 ]);
 footnote(s, [
   "Source: OpenSky Network monthly flight-record archives 2019 to 2022, daily state-vector archives, and the live REST feed.",
@@ -409,7 +409,7 @@ cardAt(s, c4, colR, fnTop4 - 0.2 - cardHeight(c4, colW), colW);
 pres.addSection({ title: "Approach" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Pipeline architecture", { placeholder: "title" });
-y = lead(s, "Seven stages in a linear flow. Each tier writes its output to disk. A downstream tier therefore rebuilds without a repeat of the work above it.");
+y = lead(s, "The pipeline has seven stages in a linear flow. Each tier writes its output to disk. A downstream tier therefore rebuilds without a repeat of the work above it.");
 
 const tiers = [
   { t: "OpenSky Network", d: "monthly archives\nlive REST feed\ndaily state archives", c: "F0F2F5", tc: BODY },
@@ -480,7 +480,7 @@ y = cardRow(s, y, [
   { fill: WARM, headColor: ORANGE, head: "Before: full rebuild",
     body: "Each run rebuilt every tier below bronze. N months of data therefore cost the sum of 1 to N months of work. This pipeline hides scaling efficiency, because wall time against volume shows rework only. A scale-out attempt also filled the disk with about 20 GB of temporary files." },
   { fill: PALE, head: "After: incremental refresh",
-    body: "One added month costs one month of work. The writer puts a partition in a temporary path, flushes it, then renames it into place. A parallel reader therefore sees the complete old partition or the complete new one. A completion marker restarts a stopped run at a partition boundary." },
+    body: "One added month costs one month of work. The writer puts a partition in a temporary path, flushes it, then renames it into place. A parallel reader therefore sees the complete old partition or the complete new one. A completion marker records the last complete partition, so a stopped run resumes at a partition boundary." },
 ]);
 statRow(s, y, [
   { value: "131 s", label: "to commit the second added month, from the partition-commit markers" },
@@ -493,7 +493,7 @@ footnote(s, ["Setup: the warehouse build took 1031 s for three months of flight 
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Streaming ingest through Kafka", { placeholder: "title" });
 const fnTop8 = footnote(s, ["Dead-letter policy: the producer diverts a record with a malformed array shape, and a record that fails to serialise, and it keeps the failure reason. The producer retries a failed poll on the next interval, so a short outage costs one window, not the run."]);
-y = lead(s, "Kafka buffers the live feed between the OpenSky REST API and the bronze tier. A task-queue broker optimises acknowledgement, not replayable streams.");
+y = lead(s, "Kafka buffers the live feed between the OpenSky REST API and the bronze tier. The project chose Kafka over a task-queue broker, because a broker optimises acknowledgement, not replayable streams.");
 y = cardRow(s, y, [
   { head: "Topics and partitions",
     body: "The raw topic has three partitions, one for each consumer worker. The dead-letter topic has one. It takes few writes, and one partition keeps global order for failure analysis." },
@@ -513,7 +513,7 @@ s.addNotes("A direct write from the API to storage was the other option. It coup
 /* 9 --------------------------------------------------- platform stack */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Big data platforms, and the reason for each one", { placeholder: "title" });
-y = lead(s, "What each platform does in the pipeline, and the property that decided it.");
+y = lead(s, "The table gives the job of each platform, and the property that decided it.");
 s.addTable(tableRows([
   ["Platform", "Role in the pipeline", "Why this one"],
   ["Apache Spark", "Distributed build of the state-observation satellite",
@@ -559,25 +559,26 @@ s.addNotes("The project uses a constant-velocity model, not a constant-accelerat
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Noise ladder and experiment design", { placeholder: "title" });
 const fnTop11 = footnote(s, [
-  "Design: 3 methods by 4 profiles gives 12 cells. Each cell runs against both inputs, with seed 42. A uniqueness constraint makes a repeat run idempotent, so every figure traces to one execution.",
+  "Design: 3 methods by 4 profiles gives 12 cells. Each cell runs against both inputs, with seed 42.",
   "Six metrics per cell: segmentation precision, recall and F1 within a 5 s tolerance; boundary time error; trajectory continuity; coverage; position RMSE; deviation-detection precision, recall and F1.",
 ]);
+s.addNotes("A uniqueness constraint over month, source, method and noise makes a repeat run idempotent. Every figure therefore traces to one execution, and not to the best of several.");
 y = lead(s, "Real ADS-B has no ground truth, so absolute position error needs a synthetic input. Four cumulative profiles degrade synthetic trajectories with known truth.");
 y = cardRow(s, y, [
   { fill: "F0F2F5", head: "N0   Clean",
-    body: "No modification. This profile sets the correctness floor. A correct method reaches near-zero error here." },
+    body: "This profile makes no change. It sets the correctness floor. A correct method reaches near-zero error here." },
   { fill: "EDF1F6", head: "N1   Gaussian jitter",
-    body: "Jitter on position and altitude. It approximates GPS multipath, receiver clock skew and refraction." },
+    body: "This profile adds jitter to position and altitude. It approximates GPS multipath and clock skew." },
   { fill: "F5EDE8", headColor: ORANGE, head: "N2   Plus 10% message loss",
-    body: "Receiver loss of signal. This profile tests continuity and coverage. A gap-aware method declares no false break." },
+    body: "This profile drops signal at the receiver. It tests continuity and coverage. A gap-aware method declares no false break." },
   { fill: "FBEDE6", headColor: ORANGE, head: "N3   Plus 10% reordering",
     body: "Two receivers send one observation at different times. This profile tests event-time order." },
 ]);
 cardRow(s, y, [
   { fill: PALE, head: "Input 1: synthetic, known truth",
-    body: "40 flights and 10 injected deviations per cell. It answers the accuracy half, because position error and flight count are measurable." },
+    body: "Each cell has 40 flights and 10 injected deviations. It answers the accuracy half, because position error and flight count are measurable." },
   { fill: PALE, head: "Input 2: real OpenSky, 4,361,653 rows per cell",
-    body: "No truth, but operational volume. This input answers the cost half. It also keeps a small sample out of the role of scalability evidence." },
+    body: "This input has no truth, but it has operational volume. It answers the cost half, and keeps a small sample out of the role of scalability evidence." },
 ], { bottom: fnTop11 - 0.18 });
 
 /* 12 ---------------------------------------------- RESULTS section divider */
@@ -602,7 +603,7 @@ s.addImage({ path: path.join(FIG, "fig1_accuracy_cost.png"),
 /* 14 --------------------------------------------------- over-fragmentation */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Kinematic segmentation over-fragments flights", { placeholder: "title" });
-const fnTop13 = footnote(s, ["Result: the Kalman-smoothed method holds 18,458 to 18,913 flights across the four profiles. The baseline gives 14,948."]);
+const fnTop13 = footnote(s, ["Result: the Kalman-smoothed method holds 18,458 to 18,913 flights across the four profiles. The baseline gives 14,946 to 14,949."]);
 s.addChart([{
   type: pres.ChartType.bar,
   data: [
@@ -660,8 +661,8 @@ s.addTable(tableRows([
 fitColumn(s, [
   { head: "The two methods scale differently in noise",
     body: "Baseline throughput stays flat. Kinematic throughput falls from 21,670 to 13,958 as noise rises. The segment count drives its cost, and that count grows." },
-  { head: "The smoother stays flat",
-    body: "12,331 to 13,490 records each second. The filter step dominates its cost, and a heavier profile drops observations." },
+  { head: "The smoother rises slightly",
+    body: "Throughput runs from 12,331 to 13,490 records each second. The filter step dominates its cost, and a heavier profile drops observations." },
 ], X + 6.9, TOP + 1.55, W - 6.9, fnTop14 - 0.18);
 
 /* 16 ------------------------------------------------------ accuracy matrix */
@@ -724,7 +725,7 @@ s.addTable(tableRows([
    "No shuffle on the single-host path, by construction"],
   ["Scaling efficiency", "Partition-commit timestamps, per month and per table",
    "131 s and 148 s for the second and third added month"],
-  ["Robustness", "The N0 to N3 ladder: missing, duplicated and out-of-order records, on both inputs",
+  ["Robustness", "The N0 to N3 ladder: jitter, missing records and out-of-order records, on both inputs",
    "12 of 12 cells complete on each input"],
 ], { size: 11.5, headSize: 11.5 }),
   { x: X, y: y, w: W, colW: [2.30, 5.18, 4.45], rowH: 0.40,
@@ -740,7 +741,7 @@ s.addNotes("Two rows point to a dashboard. Latency and resource use have instrum
 pres.addSection({ title: "Summary" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("Delivery against the proposal", { placeholder: "title" });
-y = lead(s, "The deployed system meets all seven design goals and all six performance targets.");
+y = lead(s, "The deployed system delivers all seven design goals, and it measures all six performance targets.");
 y = statRow(s, y, [
   { value: "14.1 GB", label: "raw data, 121.6 M records across 48 months of archives" },
   { value: "244.5 M", label: "warehouse rows written: 225.5 M silver, 19.0 M gold" },
@@ -769,7 +770,7 @@ y = cardRow(s, TOP + 1.04, [
   { fill: MINT, headColor: GREEN, head: "The gain comes from the estimator",
     body: "The Kalman filter cuts position error from kilometres to below a millimetre. It treats an implausible observation as a corrupt measurement, not as a flight boundary. It therefore holds the flight count at truth, where the rule alone fragmented it sevenfold." },
   { fill: PALE, head: "The cost is about six times the baseline",
-    body: "On 4.36 million real observations the smoother costs 5.8 to 6.2 times the baseline wall time. On the smaller synthetic input it costs 7.4 to 9.2 times. The smoother joins the frontier at N1 and N3. At N0 and N2 the baseline holds the frontier alone, and the other two methods dominate kinematic segmentation everywhere." },
+    body: "On 4.36 million real observations the smoother costs 5.8 to 6.2 times the baseline wall time. On the smaller synthetic input it costs 7.4 to 9.2 times. The smoother joins the frontier at N1 and N3. At N0 and N2 the baseline holds the frontier alone, and it dominates kinematic segmentation at every profile." },
 ]);
 cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0", head: "The practical reading",
   body: "The cost is worthwhile when the trajectory itself is the object of analysis. It is not worthwhile when the work needs flight boundaries only, because the baseline gives those at a sixth of the cost. This answer is sharper than the proposal expected: the gain comes from estimation, not from kinematics in general." },
@@ -778,7 +779,7 @@ cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0", head: "The practi
 /* 20 ------------------------------------------------------- future work */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("Where this goes next", { placeholder: "title" });
-y = lead(s, "Three extensions, in order of how little each one changes the delivered system.");
+y = lead(s, "These three extensions appear in order of how little each one changes the delivered system.");
 const nexts = [
   { n: "1", t: "Move the remaining builders to Spark",
     b: "The monthly partition contract and the watermark semantics are engine-independent. A move of Spark execution from the state-observation satellite to the flight-record builders changes the engine only. It is not a redesign. It also puts the last single-host work on the cluster." },
