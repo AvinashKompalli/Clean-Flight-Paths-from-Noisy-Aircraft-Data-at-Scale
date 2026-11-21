@@ -92,17 +92,11 @@ pres.defineSlideMaster({
     { text: { text: "ETL4  |  DA 231o Data Engineering at Scale",
               options: { x: X, y: 7.04, w: 7.0, h: 0.34, fontSize: 10, color: MUTED,
                          isTextBox: true, margin: 0, valign: "middle" } } },
+    // Only the title is a placeholder. A layout placeholder no slide fills is
+    // copied onto every slide as an empty "Click to add text" prompt box.
     { placeholder: {
         options: { name: "title", type: "title", x: X, y: 0.38, w: W, h: 0.62,
                    fontSize: 30, bold: true, color: NAVY, valign: "middle", margin: 0 },
-        text: "" } },
-    { placeholder: {
-        options: { name: "body", type: "body", x: X, y: TOP, w: W, h: 5.4,
-                   fontSize: 17, color: BODY, isTextBox: true },
-        text: "" } },
-    { placeholder: {
-        options: { name: "chart", type: "chart", x: X, y: TOP, w: W, h: 4.0,
-                   color: BODY },
         text: "" } },
     { slideNumber: { x: 11.83, y: 7.04, w: 0.8, h: 0.34, fontSize: 11,
                      color: MUTED, align: "right", margin: 0 } },
@@ -507,9 +501,38 @@ cardRow(s, y, [
   { fill: GREY, head: "Instrumented at the producer",
     body: "OAuth2 credentials refresh thirty seconds before expiry so a long-running producer never stalls mid-poll. Three metrics are scraped: records published, records dead-lettered by reason, and publish latency." },
 ]);
-footnote(s, ["Elsewhere in the stack: PostgreSQL enforces the watermark format as a storage constraint, Spark carries the only table whose volume exceeds single-host memory, and Great Expectations blocks promotion on a failed suite."]);
+footnote(s, ["Dead-letter policy: a record that fails to publish is retried once after a token refresh, then diverted with its failure reason rather than dropped."]);
 
-/* 9 ------------------------------------------------------ three methods */
+/* 9 --------------------------------------------------- platform stack */
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
+s.addText("Big data platforms used, and why each was chosen", { placeholder: "title" });
+y = lead(s, "What each platform does in the pipeline, and the reason it was preferred to the obvious alternative.");
+s.addTable(tableRows([
+  ["Platform", "Role in the pipeline", "Why this one"],
+  ["Apache Spark", "Distributed build of the state-observation satellite",
+   "The only table whose source volume exceeds single-host memory"],
+  ["PostgreSQL", "Telemetry, per-metric results, watermark registry, dashboard tables",
+   "Constraints reject an invalid watermark at the storage boundary, not in caller code"],
+  ["Prometheus", "Scrapes Spark, host and producer metrics",
+   "The six performance targets map onto counters, histograms and gauges directly"],
+  ["Grafana", "Eight dashboard panels over the evaluation store",
+   "Renders the accuracy against cost scatter from the same tables the report cites"],
+  ["Apache Airflow", "Schedules the streaming path, branches live against batch, retries",
+   "The batch path keeps a dedicated script, simpler to instrument per stage"],
+  ["Great Expectations", "25 expectations across 5 suites at the bronze and mart boundaries",
+   "Declarative, and a failure blocks promotion of the affected table"],
+  ["Apache Parquet", "Columnar storage with a dataset abstraction",
+   "Partition predicates push into file listing; explicit types stop hex ids parsing as integers"],
+  ["Docker Compose", "Runs the nine-service stack on one host",
+   "The target is a single workstation, where a cluster control plane adds cost only"],
+], { size: 11.5, headSize: 11.5 }),
+  { x: X, y: y, w: W, colW: [1.70, 4.35, 5.88], rowH: 0.40,
+    border: { type: "solid", color: "E3E7EC", pt: 1 }, margin: [2, 7, 2, 7],
+    objectName: "platform-table" });
+footnote(s, ["Kafka is covered on the previous slide. Schema convergence happens in one projection function, so the three source schemas meet the canonical schema in a single place rather than in each reconstruction method."]);
+s.addNotes("Airflow orchestrates the streaming path; the batch path used for the Section 3 measurements runs under a dedicated script because per-stage timing is easier to instrument there.");
+
+/* 10 ----------------------------------------------------- three methods */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Three reconstruction methods spanning a cost range", { placeholder: "title" });
 y = lead(s, "Three rather than two, because a cost-accuracy curve needs enough points to show its shape, and the three correspond to distinct families in the aviation literature.");
@@ -527,7 +550,7 @@ cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0",
   X, y, W);
 s.addNotes("Constant velocity was chosen over constant-acceleration and coordinated-turn models: higher-order models need more observations per segment to converge, and the research question is what a smoother adds, which the simplest filter isolates.");
 
-/* 10 ----------------------------------------------------- noise + design */
+/* 11 ----------------------------------------------------- noise + design */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Noise ladder and experiment design", { placeholder: "title" });
 y = lead(s, "Real ADS-B carries no ground truth, so absolute position error cannot be measured against it. Four cumulative profiles degrade synthetic trajectories whose truth is known.");
@@ -547,9 +570,12 @@ cardRow(s, y, [
   { fill: PALE, head: "Input 2: real OpenSky, 4,361,653 rows per cell",
     body: "No truth, but operational volume. Answers the cost half, and stops cost figures from a small truth-bearing sample being presented as scalability evidence." },
 ]);
-footnote(s, ["Design: 3 methods by 4 profiles is 12 cells, run against both inputs, seed fixed at 42. Re-execution is idempotent under a uniqueness constraint, so every figure traces to one execution rather than the best of several."]);
+footnote(s, [
+  "Design: 3 methods by 4 profiles is 12 cells, run against both inputs, seed fixed at 42. Re-execution is idempotent under a uniqueness constraint, so every figure traces to one execution.",
+  "Six metrics per cell: segmentation precision, recall and F1 within a 5 s tolerance; boundary time error; trajectory continuity; coverage; position RMSE; deviation-detection precision, recall and F1.",
+]);
 
-/* 11 ---------------------------------------------- RESULTS section divider */
+/* 12 ---------------------------------------------- RESULTS section divider */
 pres.addSection({ title: "Results" });
 s = pres.addSlide({ masterName: "SECTION", sectionTitle: "Results" });
 s.addText("EVALUATION", { placeholder: "eyebrow" });
@@ -557,7 +583,7 @@ s.addText("What the twelve-cell matrix measured", { placeholder: "title" });
 s.addText("Accuracy on synthetic input with known truth, cost on 4.36 million real observations, and the answer to the research question.",
   { placeholder: "body" });
 
-/* 12 ----------------------------------------------- accuracy vs cost plot */
+/* 13 ----------------------------------------------- accuracy vs cost plot */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Accuracy against computational cost", { placeholder: "title" });
 const fnTop12 = footnote(s, [
@@ -568,7 +594,7 @@ const imgH = fnTop12 - TOP - 0.22, imgW = imgH * (6.4 / 4.0);
 s.addImage({ path: path.join(FIG, "fig1_accuracy_cost.png"),
   x: (13.3333 - imgW) / 2, y: TOP, w: imgW, h: imgH, objectName: "fig1" });
 
-/* 13 ---------------------------------------------------- over-fragmentation */
+/* 14 --------------------------------------------------- over-fragmentation */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Kinematic segmentation over-fragments flights", { placeholder: "title" });
 const fnTop13 = footnote(s, ["Result: the Kalman-smoothed method holds a stable 18,458 to 18,913 flights across all four profiles, close to the baseline's 14,948."]);
@@ -597,7 +623,7 @@ fitColumn(s, [
     body: "Deviation detection collapses to 2 flags against 10 injected events at N2: the fragments are too short to contain one." },
 ], X + 6.9, TOP, W - 6.9, fnTop13 - 0.18);
 
-/* 14 ------------------------------------------------------- cost at scale */
+/* 15 ------------------------------------------------------- cost at scale */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("Cost and throughput at operational volume", { placeholder: "title" });
 const fnTop14 = footnote(s, ["Setup: 4,361,653 real OpenSky state vectors per cell on the deployment host. Real input carries no ground truth, so this slide reports cost only."]);
@@ -633,7 +659,7 @@ fitColumn(s, [
     body: "12,331 to 13,490 records per second, because its cost is dominated by filtering observations and heavier profiles drop observations." },
 ], X + 6.9, TOP + 1.55, W - 6.9, fnTop14 - 0.18);
 
-/* 15 ------------------------------------------------------ accuracy matrix */
+/* 16 ------------------------------------------------------ accuracy matrix */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
 s.addText("The twelve-cell accuracy matrix", { placeholder: "title" });
 const fnTop15 = footnote(s, ["Truth: 40 flights and 10 injected deviations per cell.",
@@ -676,7 +702,35 @@ fitColumn(s, [
     body: "The N2 smoothed cell drifts because its gate, tuned on N1 residuals, rejects valid N2 measurements. One threshold value." },
 ], MX, TOP, MW, fnTop15 - 0.10, 0.15);
 
-/* 16 ------------------------------------------------------------ delivery */
+/* 17 -------------------------------------------- six performance targets */
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Results" });
+s.addText("The six performance targets, instrumented and measured", { placeholder: "title" });
+y = lead(s, "Each proposal target was given an instrument first, so the result is a reading rather than an estimate.");
+s.addTable(tableRows([
+  ["Target", "Instrumentation", "Measured result"],
+  ["Throughput", "Per-cell row counts and wall time; producer counter scraped continuously",
+   "72,700 to 80,200 rec/s baseline;\n12,300 to 13,500 rec/s smoothed"],
+  ["End-to-end processing time", "Every stage prints and persists its elapsed time",
+   "1031 s warehouse build for 3 months;\n112.2 s downstream"],
+  ["Streaming latency", "Publish-latency histogram, 11 buckets from 1 ms to 5 s",
+   "Percentiles on the streaming dashboard"],
+  ["CPU and memory", "Host and container gauges scraped continuously",
+   "Resource dashboard"],
+  ["Shuffle and partitioning", "Spark metrics endpoint reports shuffle bytes",
+   "No shuffle on the single-host path, by construction"],
+  ["Scaling efficiency", "Partition-commit timestamps, per month and per table",
+   "131 s and 148 s for the second and third added month"],
+], { size: 11.5, headSize: 11.5 }),
+  { x: X, y: y, w: W, colW: [2.30, 5.18, 4.45], rowH: 0.44,
+    border: { type: "solid", color: "E3E7EC", pt: 1 }, margin: [2, 7, 2, 7],
+    objectName: "targets-table" });
+footnote(s, [
+  "Downstream detail: of the 112.2 s, 70.5 s writes three mart partitions and rebuilds the dimensions, 27.4 s validates data quality, 13.3 s runs the twelve-cell matrix, 0.8 s refreshes the evaluation store.",
+  "Robustness, the sixth proposal target, is demonstrated by the N0 to N3 ladder rather than by a single number: every method completes every profile without manual intervention.",
+]);
+s.addNotes("Scaling efficiency is the target that drove the architecture. Partition-commit markers let it be measured directly instead of inferred from a total, which is why the marginal per-month cost is a measurement and not an average.");
+
+/* 18 ------------------------------------------------------------ delivery */
 pres.addSection({ title: "Summary" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("What was delivered against the proposal", { placeholder: "title" });
@@ -695,7 +749,7 @@ statRow(s, y, [
 ], { size: 28, fill: GREY, color: BODY });
 footnote(s, ["Verification: three cross-tier identity checks hold exactly, confirming no rows lost or duplicated between silver and gold. Determinism was checked by byte-level hash equality on every output partition across two runs."]);
 
-/* 17 ------------------------------------------------------------- answer */
+/* 19 ------------------------------------------------------------- answer */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("Answer to the research question", { placeholder: "title" });
 s.addShape(pres.ShapeType.roundRect, { x: X, y: TOP, w: W, h: 0.88, rectRadius: 0.06,
@@ -705,17 +759,17 @@ s.addText("How much accuracy is gained by incorporating aircraft kinematics, and
     isTextBox: true, margin: 0, lineSpacingMultiple: 1.18, objectName: "q" });
 y = cardRow(s, TOP + 1.04, [
   { fill: WARM, headColor: ORANGE, head: "Kinematic segmentation alone gains nothing",
-    body: "It produces identical position error to the baseline at every noise level, because neither estimates positions. Under noise it is worse than the baseline at the task it was meant to improve, splitting 40 true flights into 285, and the same appears on real data with no injected noise." },
+    body: "Identical position error to the baseline at every profile, because neither estimates positions. Under noise it is worse at the task it was meant to improve, splitting 40 true flights into 285, and it fragments real data with no injected noise at all." },
   { fill: MINT, headColor: GREEN, head: "The gain comes from the estimator",
-    body: "The Kalman filter reduces position error from kilometres to below a millimetre, and by handling implausible observations as corrupt measurements rather than as flight boundaries it also holds the flight count at truth where the kinematic rule alone fragmented it sevenfold." },
+    body: "The Kalman filter cuts position error from kilometres to below a millimetre. By treating an implausible observation as a corrupt measurement rather than a flight boundary, it also holds the flight count at truth where the rule alone fragmented it sevenfold." },
   { fill: PALE, head: "The cost is about six times the baseline",
-    body: "Measured on 4.36 million real observations: 5.8 to 6.2 times the baseline wall time, and 7.4 to 9.2 times on the smaller synthetic input. Within each profile the frontier holds the baseline and the smoother; kinematic segmentation is dominated everywhere." },
+    body: "On 4.36 million real observations: 5.8 to 6.2 times the baseline wall time, and 7.4 to 9.2 times on the smaller synthetic input. Within every profile the frontier holds the baseline and the smoother; kinematic segmentation is dominated." },
 ]);
 cardAt(s, { fill: NAVY, headColor: WHITE, bodyColor: "C7D2E0", head: "The practical reading",
-  body: "The trade is worthwhile when the trajectory itself is the object of analysis, and not worthwhile when only flight boundaries are required: those are well served by the baseline at a sixth of the cost. This is a sharper answer than the proposal anticipated, because it attributes the gain to estimation rather than to kinematic reasoning in general." },
+  body: "Worth the cost when the trajectory itself is the object of analysis; not worth it when only flight boundaries are required, since the baseline serves those at a sixth of the cost. This is a sharper answer than the proposal anticipated, because it attributes the gain to estimation rather than to kinematic reasoning in general." },
   X, y, W);
 
-/* 18 ------------------------------------------------------- future work */
+/* 20 ------------------------------------------------------- future work */
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Summary" });
 s.addText("Where this goes next", { placeholder: "title" });
 y = lead(s, "Three extensions, in order of how little they change the delivered system.");
@@ -744,7 +798,7 @@ nexts.forEach((nx) => {
 footnote(s, ["Accompanying the deck: source code, 92 automated tests, eight Grafana dashboards, the append-only decision log and the reproducibility fixtures."]);
 
 /* --------------------------------------------------------------- write */
-const OUT = "B:/IISC/DE/Proj/etl4/docs/ETL4_Project_Presentation.pptx";
+const OUT = process.env.DECK_OUT || "B:/IISC/DE/Proj/etl4/docs/ETL4_Project_Presentation.pptx";
 (async () => {
   await pres.writeFile({ fileName: OUT });
   const { applyTheme } = require("C:/Users/avina/.claude/skills/synced/e174a0e3-be4a-4e49-9d72-175513a4de71_3b498e84-05af-4202-9b3a-f2a4c9d06330/pptx/scripts/apply_theme.js");
