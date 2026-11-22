@@ -96,7 +96,7 @@ The pipeline has seven stages. Data moves forward through quality tiers, and eac
               Relational evaluation store and dashboards
 ```
 
-Monthly flight-record archives and daily state-vector files enter through the batch loaders and are written directly to bronze. Live REST observations are buffered through Kafka and landed in the same bronze layout by the Kafka consumer. No historical archive passes through the broker.
+Monthly flight-record archives and daily state-vector files enter through the batch loaders and are written directly to bronze. Live REST observations are buffered through Kafka, and the Kafka consumer writes them into the same bronze state-vector dataset that the daily batch path writes to. The monthly flight-record archives land in their own bronze dataset. No historical archive passes through the broker.
 
 The bronze, silver and gold separation follows the Medallion pattern, chosen over a single-tier design because the dominant cost here is repeated work. With one tier, every schema change forces a fresh pull from OpenSky, which is rate-limited and intermittently unavailable, and every metric change forces a fresh cleaning pass, the most CPU-intensive stage in the pipeline. Separate tiers decouple both.
 

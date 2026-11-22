@@ -453,7 +453,7 @@ tiers.forEach((tr, i) => {
   }
 });
 const fnTop5 = footnote(s, [
-  "Paths: Kafka carries the live REST feed only. The batch loaders write the archives to bronze with no broker. Both paths land in one bronze layout.",
+  "Paths: Kafka carries the live REST feed only. The consumer writes it beside the daily state files. The batch loaders write the archives to bronze with no broker.",
   "Deployment: Docker Compose runs nine services on one workstation. The Spark cluster has one master and two workers.",
 ]);
 cardAt(s, { fill: GREY, head: "Why three tiers rather than one",
