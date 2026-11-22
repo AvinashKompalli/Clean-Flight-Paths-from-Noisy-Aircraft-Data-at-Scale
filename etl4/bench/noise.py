@@ -1,4 +1,4 @@
-"""Controlled noise injection for robustness experiments (plan 12.2).
+"""Controlled noise injection for robustness experiments.
 
 Profiles N0 to N3 inject gaps, duplicates, out-of-order shuffles, and
 position jumps. Applied AFTER a clean synthetic dataset is generated so

@@ -829,7 +829,14 @@ footnote(s, ["The deck has these attachments: source code, 92 automated tests, e
 const OUT = process.env.DECK_OUT || "B:/IISC/DE/Proj/etl4/docs/ETL4_Project_Presentation.pptx";
 (async () => {
   await pres.writeFile({ fileName: OUT });
-  const { applyTheme } = require("C:/Users/avina/.claude/skills/synced/e174a0e3-be4a-4e49-9d72-175513a4de71_3b498e84-05af-4202-9b3a-f2a4c9d06330/pptx/scripts/apply_theme.js");
-  await applyTheme(OUT, THEME);
+  // pptxgenjs writes the two theme fonts but hard-codes Office's palette, so
+  // every scheme color resolves to Office blue until a post-pass writes THEME
+  // into ppt/theme/theme1.xml. Point APPLY_THEME_JS at that helper.
+  if (process.env.APPLY_THEME_JS) {
+    const { applyTheme } = require(process.env.APPLY_THEME_JS);
+    await applyTheme(OUT, THEME);
+  } else {
+    console.log("APPLY_THEME_JS unset: scheme colors left on the pptxgenjs default palette");
+  }
   console.log("wrote " + OUT);
 })();

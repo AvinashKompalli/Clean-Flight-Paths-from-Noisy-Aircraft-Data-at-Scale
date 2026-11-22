@@ -1,6 +1,6 @@
 """Reference / expected trajectory construction.
 
-Priority of reference sources (per plan.md section 6.6):
+Priority of reference sources:
   1. Flight-plan record            (if available)
   2. Great-circle route            (nearest airport inference from endpoints)
   3. Historical corridor           (median path across prior days for same callsign)

@@ -13,8 +13,7 @@ Two families of functions coexist here:
     plus `position_rmse_m` / `coverage_ratio` overloads that activate
     when a `NoiseTruth` is passed instead of a frame. These are the
     scorers wired into `bench/run_experiment.py::reconstruct_from_silver`
-    for the synthetic-path metric matrix (plan.md section 15, course
-    PDF section 3, ADR 2026-11-14).
+    for the synthetic-path metric matrix (ADR 2026-11-14).
 
 NoiseTruth is only type-referenced for annotations -- `etl4.bench` is
 imported for runtime isinstance checks via a local import to avoid a

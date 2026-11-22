@@ -12,6 +12,16 @@ CLAUDE.md
 .github/
 .DS_Store
 
+# Working notes and assistant scaffolding — local only, never on main
+multi-agent-engineering/
+plan.md
+etl4/docs/plan.md
+etl4/docs/grader_scorecard.md
+etl4/docs/viva_prep.md
+etl4/docs/de_scale_critique.md
+etl4/docs/impr01_report.md
+etl4/docs/test_coverage_audit.md
+
 # Archives / downloads
 *.zip
 *.crdownload
