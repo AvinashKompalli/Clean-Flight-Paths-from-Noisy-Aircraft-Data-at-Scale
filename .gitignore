@@ -5,14 +5,12 @@ __pycache__/
 *.pyc
 *.pyo
 
-# IDE / tooling
+# IDE / tooling — local only, never on main
 .vscode/
-.claude/*
+.claude/
 CLAUDE.md
+.github/
 .DS_Store
-# ... but share the multi-agent org that the team uses
-!.claude/agents/
-!.claude/commands/
 
 # Archives / downloads
 *.zip
