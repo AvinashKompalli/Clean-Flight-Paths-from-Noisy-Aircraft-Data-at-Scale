@@ -96,8 +96,8 @@ def _parse_csv_str(s: str) -> list[str]:
 def _load_bronze(bronze_dir: Path) -> pd.DataFrame:
     """Concat every parquet under the bronze tree.
 
-    Follows CLAUDE.md section 7: never ``pd.read_parquet`` a partition tree;
-    read individual files then concat.
+    Never ``pd.read_parquet`` a partition tree: the partition column type
+    differs across files and Arrow raises. Read individual files, then concat.
     """
     files = sorted(bronze_dir.rglob("*.parquet"))
     if not files:

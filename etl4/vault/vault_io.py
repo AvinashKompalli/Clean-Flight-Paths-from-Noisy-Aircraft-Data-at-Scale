@@ -12,25 +12,23 @@ concerns, one module:
 2. Atomic writes via ``.part.parquet.<pid>.tmp`` + ``os.replace``.
    Deterministic ``part.parquet`` filenames for resume; ``ym`` stays
    inside the file body when the caller includes it in the frame, so
-   CLAUDE.md section 7 "read individual files and concat" continues to
-   work.
+   reading individual files and concatenating them continues to work.
 
 3. ``ym`` derivation helpers. One source of truth shared by the vault
    writer, the migration script, the mart writer, and the Postgres
-   backfill (architecture.md section 2.5).
+   backfill.
 
 Reader-fallback precedence when both layouts coexist (migration window):
 partitioned wins; the stale monolith is ignored. Empty tables return
 ``pd.DataFrame()`` with no columns -- existing callers already handle
-that shape (vault_io_spec.md section 5.3).
+that shape.
 
 The reader globs ``<ym_dir>/*.parquet`` rather than only ``part.parquet``
 so the Spark-emitted ``part-NNNNN-*.parquet`` shards from
-``raw_vault_spark.py`` load transparently (vault_io_spec.md section 6
-Spark writer note). The writer still emits a deterministic ``part.parquet``
-for resume.
+``raw_vault_spark.py`` load transparently. The writer still emits a
+deterministic ``part.parquet`` for resume.
 
-See: ``multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/vault_io_spec.md``
+See ``etl4/docs/data_vault_design.md`` for the partition contract.
 """
 from __future__ import annotations
 

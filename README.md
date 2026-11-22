@@ -6,7 +6,7 @@ Scalable kinematic flight-trajectory reconstruction from noisy ADS-B data: accur
 
 Three reconstruction methods — (A) time-gap segmentation, (B) kinematic segmentation on speed/altitude-rate/turn-rate, and (C) a 6-state constant-velocity Kalman smoother — are run against the same cleaned ADS-B feed under four controlled noise profiles (N0-N3) and compared on one `(method x noise)` matrix.
 
-Central research question (verbatim from `plan.md` §1):
+Central research question, verbatim from the project proposal:
 
 > *How much reconstruction accuracy is gained by incorporating aircraft kinematics, and what computational cost is required to obtain that improvement at large scale?*
 
@@ -125,8 +125,6 @@ the same stages on a schedule.
 
 | Path | What lives there |
 | --- | --- |
-| `plan.md` | Authoritative hand-off-grade specification |
-| `CLAUDE.md` | AI-assistant operating contract |
 | `etl4/` | Pipeline source (ingest, clean, reconstruct, bench, vault, tests) |
 | `etl4/run_e2e.py` | One-command end-to-end runner (9 stages, `--only` / `--skip` aware) |
 | `etl4/control/` | Stdlib-only HTTP control panel (`python -m etl4.control.control_panel`) |
@@ -141,8 +139,9 @@ the same stages on a schedule.
 
 ## Where to go from here
 
-- Full specification: `plan.md`
+- Final report: `etl4/docs/project_report.md`
 - Experimental write-up with numbers: `etl4/docs/final_report.md`
+- Silver-tier data model: `etl4/docs/data_vault_design.md`
 - Design decisions and rationale: `etl4/docs/decisions.md`
 - Test suite: `pytest etl4/tests/test_pipeline.py -v`
 

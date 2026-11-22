@@ -422,8 +422,8 @@ def migrate_one(
                     "(%d NA rows in a %d-row batch)"
                     % (spec.ym_column, int(na_mask.sum()), batch.num_rows)
                 )
-            # Vectorized grouping via pandas factorize (CLAUDE.md section
-            # 3.2) -- no per-row python loop over the batch.
+            # Vectorized grouping via pandas factorize -- no per-row python
+            # loop over the batch.
             codes, uniques = pd.factorize(ym.to_numpy(), sort=False)
             for i, ym_str in enumerate(uniques):
                 ym_str = str(ym_str)

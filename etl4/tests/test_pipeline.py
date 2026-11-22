@@ -217,7 +217,7 @@ def test_run_experiment_time_gap_end_to_end(synth_bronze, tmp_path, monkeypatch)
 # --- crash-safety and strengthened invariants (Round 7) -------------------
 
 def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
-    """Guards plan.md §13 crash-safety: matrix.csv must be persisted after
+    """Guards crash-safety: matrix.csv must be persisted after
     every (method, noise) cell, so a kill on cell N preserves cells 1..N-1."""
     import importlib
     import sys as _sys
@@ -271,7 +271,7 @@ def test_matrix_csv_written_after_every_cell(tmp_path, monkeypatch):
 
 
 def test_kinematic_na_safety_strong():
-    """Guards plan.md §17.4: segmentation must not raise on BooleanDtype/Int64
+    """Guards NA safety: segmentation must not raise on BooleanDtype/Int64
     NAs in position_jump, alt_rate, turn_rate. Without `.fillna()` before the
     boolean OR chain, pandas raises TypeError: boolean value of NA is ambiguous."""
     n = 5
@@ -294,7 +294,7 @@ def test_kinematic_na_safety_strong():
 
 
 def test_clean_coerces_icao24_to_string_dtype():
-    """Guards plan.md §0.6 / CLAUDE.md §2.6: icao24 must END UP pandas `string`
+    """Guards the icao24 dtype: icao24 must END UP pandas `string`
     through project_raw and clean, regardless of input dtype. Pandas can
     silently parse a hex string like `0a1b2c` to int `10534700`, which
     cross-joins airframes — project_raw must FORCE string.
@@ -333,7 +333,7 @@ def test_clean_coerces_icao24_to_string_dtype():
 
 
 def test_deviations_duration_filter_30s_no_fire_90s_fire():
-    """Guards plan.md §9 / deviations.py `MIN_EVENT_DURATION_S=60`: a 30-s
+    """Guards `deviations.py::MIN_EVENT_DURATION_S=60`: a 30-s
     off-route spike must NOT produce an event; a 90-s run must."""
     import numpy as np
 

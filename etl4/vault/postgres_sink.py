@@ -19,8 +19,7 @@ Targets:
   dim_aircraft               -- non-partitioned on disk, idempotent upsert
   fact_trajectory_enriched   -- partitioned at data/gold/marts/.../ym=YYYY-MM/
 
-See multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/
-architecture.md sections 4.1-4.3.
+See etl4/docs/data_vault_design.md for the partition contract.
 """
 from __future__ import annotations
 

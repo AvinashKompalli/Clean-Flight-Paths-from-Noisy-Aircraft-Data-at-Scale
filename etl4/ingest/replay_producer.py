@@ -29,7 +29,7 @@ PRODUCE_LATENCY = Histogram(
 
 def load_bronze(path):
     # A direct pd.read_parquet() on a date=/hour= tree raises ArrowTypeError when
-    # the partition column type differs across files (plan.md §17.3). Iterate
+    # the partition column type differs across files. Iterate
     # the tree and concat the individual files instead.
     p = Path(path)
     if p.is_file():

@@ -143,7 +143,7 @@ The synthetic matrix runs the same `(method x noise)` grid against 20 aircraft, 
 | N3    | kinematic            |   0.428  |     331 |   3 |     0.8829 |     17971.2 |  0.216 |    1.876 |
 | N3    | kinematic_smoothing  |   1.059  |      40 |  13 |     0.8798 |   1954775.6 |  1.000 |    1.876 |
 
-**Criterion 3 — PASS.** `plan.md` §15 criterion 3 requires `(kinematic_smoothing, N0).rmse_m < (time_gap, N0).rmse_m`. The file reads 0.0 < 3377.9, a strict pass by six orders of magnitude; it also holds at N1 (0.0 < 5298.9). Method C reconstructs truth to float precision on clean data because the measurement model (`MEAS_NOISE_M = 25.0`) is looser than the actual synthetic noise and the Mahalanobis gate (CHI2 = 16.27) rejects injected jumps cleanly — gate fire rate at N0 is 0.17%, within roundoff of the generator's `p_jump = 0.002`.
+**Criterion 3 — PASS.** Acceptance criterion 3 requires `(kinematic_smoothing, N0).rmse_m < (time_gap, N0).rmse_m`. The file reads 0.0 < 3377.9, a strict pass by six orders of magnitude; it also holds at N1 (0.0 < 5298.9). Method C reconstructs truth to float precision on clean data because the measurement model (`MEAS_NOISE_M = 25.0`) is looser than the actual synthetic noise and the Mahalanobis gate (CHI2 = 16.27) rejects injected jumps cleanly — gate fire rate at N0 is 0.17%, within roundoff of the generator's `p_jump = 0.002`.
 
 **Method B's flight count climbs with noise** (86 → 111 → 211 → 331) because `position_jump` fires on genuine kinematic violations introduced by the noise injector. This is the segmentation-does-its-job signal: a noisier stream *looks* like more flight boundaries to Method B, by design. Method C's flight count is flat at 40 across all four noise profiles because its segmentation layer passes `break_on_jump=False` (ADR 2026-11-09) — Method C leaves jump handling to the Kalman gate rather than the segmenter, so only the time-gap boundaries fire. 40 flights = 20 aircraft × 2 hours, split by the generator's 45-minute inter-hour gap.
 
@@ -169,6 +169,6 @@ Four follow-ups are concrete and scoped. First, the Spark promotion of method C:
 
 - The OpenSky Network, "Bringing up OpenSky: A large-scale ADS-B sensor network for research" (IPSN 2014).
 - Schäfer et al., "OpenSky Report" series, for state-vector schema stability over 2020-2022.
-- `plan.md` at the repo root — authoritative implementation specification for this project.
+- `etl4/docs/data_vault_design.md` — silver-tier data model and partition contract.
 - `etl4/docs/decisions.md` — ADR log covering every architectural and parameter choice baked into the pipeline, with dates and alternatives considered.
 - Course proposal: `ETL4 (3) (1).pdf` at the repo root, supplied with the project brief.

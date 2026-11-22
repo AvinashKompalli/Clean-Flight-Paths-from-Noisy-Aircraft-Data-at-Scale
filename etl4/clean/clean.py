@@ -66,7 +66,7 @@ def project_raw(df: pd.DataFrame, source: str) -> pd.DataFrame:
         df["hour"] = (df["time"].astype("Int64") // 3600) * 3600
     # icao24 MUST be pandas StringDtype. If upstream passed object (e.g. a hex
     # string like "0a1b2c"), pandas can silently parse it to int 10534700,
-    # which cross-joins airframes. See plan.md §0.6.
+    # which cross-joins airframes.
     df["icao24"] = df["icao24"].astype("string")
     return df
 

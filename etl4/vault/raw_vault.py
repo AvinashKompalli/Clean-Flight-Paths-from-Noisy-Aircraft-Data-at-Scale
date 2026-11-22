@@ -539,7 +539,7 @@ def _chunked_flightlist_vault(flightlist_dir: Path, states_hub_input: pd.DataFra
             frame = builders_partitioned[t](fl)
             frame = frame.reset_index(drop=True)
             # Keep the partition key inside the file body so pure-file reads
-            # (CLAUDE.md section 7) retain it. See architecture finding #4.
+            # retain it; reading the partition tree directly raises in Arrow.
             frame["ym"] = pd.Series([ym] * len(frame), dtype="string")
             vault_io.write_partition(frame, t, ym, out_dir=out_dir)
             _write_done(t, ym, out_dir, load_dt)

@@ -3,7 +3,7 @@
 Takes a bronze Parquet source, runs each reconstruction method, appends one
 metric row per method to data/eval/runs.csv, and writes one pipeline_runs
 row to Postgres. With --write-silver and/or --write-gold, also persists:
-  silver = cleaned + event-time-ordered canonical schema (plan.md §6.1)
+  silver = cleaned + event-time-ordered canonical schema
   gold   = reconstructed per-flight output per method
 
 Usage:
