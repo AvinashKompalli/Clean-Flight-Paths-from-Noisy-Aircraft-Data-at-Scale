@@ -1,0 +1,232 @@
+-- Pipeline run registry and evaluation results.
+-- Apply with: docker exec -i etl4-postgres psql -U etl4 -d etl4 < infra/create_tables.sql
+
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    run_id       SERIAL PRIMARY KEY,
+    run_date     DATE,
+    source       TEXT,            -- 'live' | 's3' | 'synthetic'
+    method       TEXT,            -- 'time_gap' | 'kinematic' | 'kinematic_smoothing'
+    noise        TEXT,            -- 'N0' | 'N1' | 'N2' | 'N3'
+    rows_in      BIGINT,
+    rows_out     BIGINT,
+    wall_secs    DOUBLE PRECISION,
+    cpu_secs     DOUBLE PRECISION,
+    shuffle_mb   DOUBLE PRECISION,
+    started_at   TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS eval_results (
+    run_id       INTEGER REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+    metric       TEXT,
+    value        DOUBLE PRECISION,
+    recorded_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS deviation_events (
+    event_id       SERIAL PRIMARY KEY,
+    run_id         INTEGER REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+    icao24         TEXT,
+    flight_id      TEXT,
+    start_time     BIGINT,
+    end_time       BIGINT,
+    type           TEXT,          -- 'cross_track' | 'altitude' | 'residual'
+    max_distance   DOUBLE PRECISION,
+    peak_residual  DOUBLE PRECISION
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_method    ON pipeline_runs(method);
+CREATE INDEX IF NOT EXISTS idx_runs_source    ON pipeline_runs(source);
+CREATE INDEX IF NOT EXISTS idx_eval_metric    ON eval_results(metric);
+CREATE INDEX IF NOT EXISTS idx_dev_icao       ON deviation_events(icao24);
+
+-- Data Vault 2.0 marts (loaded by etl4/vault/postgres_sink.py).
+-- The Flight Paths dashboard queries these two tables.
+
+CREATE TABLE IF NOT EXISTS dim_aircraft (
+    hk_aircraft   CHAR(32) PRIMARY KEY,
+    icao24        TEXT NOT NULL,
+    registration  TEXT,
+    typecode      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fact_trajectory_enriched (
+    hk_aircraft   CHAR(32) NOT NULL,
+    icao24        TEXT     NOT NULL,
+    time          BIGINT   NOT NULL,
+    lat           DOUBLE PRECISION,
+    lon           DOUBLE PRECISION,
+    baroaltitude  DOUBLE PRECISION,
+    velocity      DOUBLE PRECISION,
+    heading       DOUBLE PRECISION,
+    callsign      TEXT,
+    typecode      TEXT,
+    registration  TEXT,
+    PRIMARY KEY (hk_aircraft, time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dim_aircraft_icao ON dim_aircraft(icao24);
+CREATE INDEX IF NOT EXISTS idx_dim_aircraft_type ON dim_aircraft(typecode);
+CREATE INDEX IF NOT EXISTS idx_fact_traj_call    ON fact_trajectory_enriched(callsign);
+CREATE INDEX IF NOT EXISTS idx_fact_traj_icao    ON fact_trajectory_enriched(icao24);
+CREATE INDEX IF NOT EXISTS idx_fact_traj_time    ON fact_trajectory_enriched(time);
+CREATE INDEX IF NOT EXISTS idx_fact_traj_type    ON fact_trajectory_enriched(typecode);
+
+-- Ingest-path telemetry. One row per ingest invocation (screpper S3, screpper
+-- zenodo, synthetic generator, replay producer, nightly vault rebuild).
+-- Fuels dashboard 05_ingest_comparison.
+CREATE TABLE IF NOT EXISTS ingest_runs (
+    run_id         SERIAL PRIMARY KEY,
+    source         TEXT NOT NULL,         -- 's3'|'zenodo'|'synthetic'|'replay'|'vault_rebuild'
+    pattern        TEXT NOT NULL,         -- 'batch'|'stream'|'generative'
+    started_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ,
+    wall_seconds   DOUBLE PRECISION,
+    rows_out       BIGINT DEFAULT 0,
+    bytes_out      BIGINT DEFAULT 0,
+    status         TEXT DEFAULT 'running', -- 'running'|'ok'|'error'
+    error_message  TEXT,
+    extras         JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_ingest_source  ON ingest_runs(source);
+CREATE INDEX IF NOT EXISTS idx_ingest_started ON ingest_runs(started_at DESC);
+
+-- Scale-study results (populated by etl4/bench/scale_study.py). One row per
+-- (method, data_volume_rows) cell. Column order and NULL/DEFAULT choices are
+-- aligned to the defensive CREATE TABLE in scale_study.py so apply-order of
+-- the two statements is immaterial.
+CREATE TABLE IF NOT EXISTS scale_runs (
+  scale_run_id       BIGSERIAL PRIMARY KEY,
+  recorded_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  data_volume_rows   BIGINT NOT NULL,
+  source             TEXT NOT NULL,         -- 's3' | 'rest' | 'synthetic'
+  method             TEXT NOT NULL,         -- 'time_gap' | 'kinematic' | 'kinematic_smoothing'
+  noise              TEXT NOT NULL,         -- 'N0'..'N3'
+  wall_secs          DOUBLE PRECISION,
+  rows_per_sec       DOUBLE PRECISION,
+  peak_rss_mb        BIGINT,
+  shuffle_mb         BIGINT,                -- Spark-engine runs only; NULL for pandas
+  engine             TEXT NOT NULL,         -- 'pandas' | 'spark' | 'duckdb'
+  seed               INTEGER NOT NULL DEFAULT 42,
+  notes              TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_method    ON scale_runs(method);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_volume    ON scale_runs(data_volume_rows);
+CREATE INDEX IF NOT EXISTS idx_scale_runs_recorded  ON scale_runs(recorded_at DESC);
+
+-- Pareto frontier for dashboard 08_accuracy_cost. Real-data cells (no
+-- synthetic ground truth) have NULL rmse_m and drop out of the view
+-- naturally; the wall_secs guard prevents a division edge-case in the
+-- efficiency column.
+CREATE OR REPLACE VIEW v_pareto_frontier AS
+SELECT fer.method,
+       fer.noise,
+       fer.rmse_m         AS accuracy_y,
+       fer.wall_secs      AS cost_x,
+       CASE WHEN fer.wall_secs > 0 THEN fer.rmse_m / fer.wall_secs ELSE NULL END AS efficiency
+  FROM fact_experiment_result fer
+ WHERE fer.rmse_m IS NOT NULL
+   AND fer.wall_secs IS NOT NULL;
+
+-- Partition watermark registry (IMPR-01). One row per (layer, table_name)
+-- holds the highest ym=YYYY-MM already materialized. Readers compare against
+-- this to decide which months to (re)build. A missing row means "process
+-- everything from the earliest bronze" (vault bootstrap).
+--
+-- Written in the same transaction as the layer load so a crash cannot leave
+-- the watermark disagreeing with the storage. The CHECK regex rejects any
+-- non-calendar ym (e.g. '2022-7', '2022-13'). The sentinel 'SYN-<seed_hex>'
+-- used by synthetic matrix cells is NOT written to this table -- it only
+-- appears on pipeline_runs.ym, where no CHECK is applied.
+CREATE TABLE IF NOT EXISTS pipeline_watermarks (
+    layer       TEXT NOT NULL,
+    table_name  TEXT NOT NULL,
+    last_ym     TEXT NOT NULL,
+    row_count   BIGINT,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (layer, table_name),
+    CHECK (last_ym ~ '^[0-9]{4}-(0[1-9]|1[0-2])$')
+);
+CREATE INDEX IF NOT EXISTS idx_watermarks_layer ON pipeline_watermarks(layer);
+
+-- IMPR-01 T-01B: pipeline_runs.ym (ADD COLUMN + backfill + NOT NULL + UNIQUE)
+-- Synthetic cells get the SYN-<seed_hex> sentinel (per architecture section 2.3)
+-- because they have no natural calendar month. Real sources get the
+-- run_date's YYYY-MM.
+ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS ym TEXT;
+
+-- Backfill: idempotent. SYN sentinel for synthetic (seed_hex derived
+-- from the matrix seed=42 -> 'SYN-002A'); YYYY-MM from run_date / started_at
+-- otherwise.
+UPDATE pipeline_runs
+   SET ym = CASE
+       WHEN source = 'synthetic' THEN 'SYN-002A'
+       WHEN started_at IS NOT NULL
+            THEN to_char(started_at, 'YYYY-MM')
+       WHEN run_date IS NOT NULL
+            THEN to_char(run_date, 'YYYY-MM')
+       ELSE 'UNKNOWN'
+       END
+ WHERE ym IS NULL;
+
+-- Duplicate collapse: if existing rows have the same (ym, source, method, noise)
+-- after backfill, keep the one with the highest run_id (newest). This HAS to
+-- happen before the UNIQUE constraint; otherwise it will fail.
+WITH ranked AS (
+  SELECT run_id,
+         ROW_NUMBER() OVER (
+             PARTITION BY ym, source, method, noise
+             ORDER BY run_id DESC
+         ) AS rn
+    FROM pipeline_runs
+   WHERE ym IS NOT NULL
+)
+DELETE FROM pipeline_runs
+ WHERE run_id IN (SELECT run_id FROM ranked WHERE rn > 1);
+
+-- Lock in: no future row may skip ym
+ALTER TABLE pipeline_runs ALTER COLUMN ym SET NOT NULL;
+
+-- Unique composite so PR4's INSERT ... ON CONFLICT (ym, source, method, noise)
+-- DO NOTHING can function. Idempotent via the IF NOT EXISTS pattern on the
+-- constraint name - PG does not support IF NOT EXISTS on ADD CONSTRAINT, so
+-- wrap in DO block.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'pipeline_runs_ym_src_mth_noise_key'
+    ) THEN
+        ALTER TABLE pipeline_runs
+            ADD CONSTRAINT pipeline_runs_ym_src_mth_noise_key
+            UNIQUE (ym, source, method, noise);
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_ym ON pipeline_runs(ym);
+
+-- IMPR-01 T-23: ym-grouped projection over fact_experiment_result. Mirrors
+-- v_pareto_frontier pattern (one CREATE OR REPLACE VIEW, read-only). The
+-- underlying `last_ym` column is added by run_e2e.py::stage_eval_mart;
+-- guarded so this file is idempotent even on a fresh DB where
+-- stage_eval_mart has not yet run (same latent dependency as
+-- v_pareto_frontier -> fact_experiment_result; see architecture.md R9).
+-- `source = source` keeps count(*) null-safe without a second column name.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'fact_experiment_result'
+           AND column_name = 'last_ym'
+    ) THEN
+        CREATE OR REPLACE VIEW v_eval_mart_ym AS
+        SELECT last_ym AS ym,
+               source,
+               count(*) FILTER (WHERE source = source) AS cells,
+               MAX(wall_secs) AS slowest_wall_s,
+               AVG(rmse_m) FILTER (WHERE rmse_m IS NOT NULL) AS mean_rmse_m,
+               AVG(seg_f1) FILTER (WHERE seg_f1 IS NOT NULL) AS mean_seg_f1
+          FROM fact_experiment_result
+         GROUP BY last_ym, source
+         ORDER BY last_ym, source;
+    END IF;
+END $$;

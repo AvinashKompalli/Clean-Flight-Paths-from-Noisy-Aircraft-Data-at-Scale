@@ -1,0 +1,62 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-001",
+  "from_agent": "product-owner",
+  "to_agent": "orchestrator",
+  "current_phase": "REQUIREMENTS",
+  "objective": "Formalize business framing + functional + non-functional requirements + acceptance criteria + RTM for the implementation of ADR 2026-11-13 (ym=YYYY-MM partition contract and watermark-driven incremental refresh). ADR carries the design; this document carries the business acceptance contract.",
+  "input_artifacts": [
+    "ETL4 (3) (1).pdf (section 1 headline question, section 3 Performance Metrics for Success)",
+    "CLAUDE.md",
+    "etl4/docs/decisions.md (ADR 2026-11-13 + ADR 2026-11-18)",
+    "multi-agent-engineering/improvements_backlog.md (IMPR-01 entry and IMPR-04..IMPR-12 follow-ups)",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json",
+    "multi-agent-engineering/templates/requirements_template.md"
+  ],
+  "expected_output": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md with status=APPROVED, 100% traceability coverage.",
+  "dependencies": [],
+  "acceptance_criteria": [
+    "Every ADR 2026-11-13 deliverable has at least one FR",
+    "Every FR has at least one testable boolean AC",
+    "RTM covers 100% of FRs with code module + test case mapping",
+    "Scope boundaries explicitly separate IMPR-01 from IMPR-02, IMPR-03, and WI-1",
+    "WI-1 AC-10 and AC-11 explicitly protected as NFR-10"
+  ],
+  "risks": [
+    "IMPR-12 (20.75% flightlist->hub_flight reconcile drift) must be filed/triaged before architecture starts, else NFR-03 bypasses reconcile.py and measures row preservation directly against parquet.",
+    "Open question for data-engineer on v_pareto_frontier cardinality once ym lands on pipeline_runs - WI-1 AC-11 (count=12) is a hard guard.",
+    "ADR section 6 proposes floor(time / month_seconds) for sat_state_observation ym extraction; this does not align to calendar months; flagged as open question #5 for data-engineer to replace with pd.Timestamp strftime('%Y-%m').",
+    "Matrix ON CONFLICT DO NOTHING contradicts WI-1 NFR-05 overwrite semantics; resolved by routing re-measurement through rewind --layer matrix; documented as open question #2 for data-engineer to confirm.",
+    "Sink conflict keys for fact_flight and dim_airport are not named in ADR - open question #3 proposes hk_flight / hk_airport pending data-engineer verification that the DDL declares matching unique constraints.",
+    "State.json upstream_design wording 'view or materialized view' is drift from the ADR which says 'plain SQL view'; requirements.md takes the ADR line and flags for orchestrator correction."
+  ],
+  "status": "APPROVED",
+  "evidence": {
+    "artifacts": [
+      "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+      "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json"
+    ],
+    "commands_run": [
+      "Read etl4/docs/decisions.md (ADR tail)",
+      "Read multi-agent-engineering/improvements_backlog.md",
+      "Read multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json",
+      "Read multi-agent-engineering/templates/requirements_template.md",
+      "Read multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md (style reference)",
+      "Read ETL4 (3) (1).pdf (section 1 + section 3)",
+      "advisor() consulted before writing",
+      "Write multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+      "Edit multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json"
+    ],
+    "test_counts": {
+      "functional_requirements": 18,
+      "non_functional_requirements": 17,
+      "acceptance_criteria": 18,
+      "open_questions": 6,
+      "risks": 4,
+      "traceability_coverage_percent": 100
+    },
+    "notes": "FRs cover the full ADR 2026-11-13 scope plus the four ADR follow-ups (marts --only-ym, ym on fact_trajectory_enriched, pipeline_runs ym backfill + duplicate collapse, watermark writes everywhere). ADR-missing items added as FRs: reader fallback to monolithic part.parquet (FR-14), ym helper (FR-16), cross-month flight merge rule (FR-15), drift QA check (FR-17). WI-1 invariants (AC-10 and AC-11) explicitly preserved as NFR-10. eval_mart converted to plain SQL view per ADR 2026-11-13 and 2026-11-18 (NOT materialized view, correcting state.json drift). Migration no-row-loss (NFR-03) measured directly against parquet, not through reconcile.py, due to IMPR-12 noise. Matrix re-measurement semantics changed from WI-1 NFR-05 (overwrite) to ON CONFLICT DO NOTHING + rewind path; flagged as an open question for data-engineer to confirm."
+    },
+  "next_action": "Orchestrator to append APPROVED to state.json approval_history (gate=REQUIREMENTS, approver=product-owner), advance phase to ARCHITECTURE, and dispatch data-engineer with requirements.md as the input artifact and the 6 open questions as decisions-to-make. Data-engineer must also confirm IMPR-12 status before committing to NFR-03 verification instrument.",
+  "timestamp_utc": "2026-11-18T06:12:00Z"
+}

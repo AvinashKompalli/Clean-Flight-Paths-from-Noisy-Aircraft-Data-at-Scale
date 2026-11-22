@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://etl4.iisc/schemas/project_state.schema.json",
+  "title": "Project State",
+  "type": "object",
+  "required": ["project_id", "title", "created_at_utc", "phase", "tasks", "approval_history"],
+  "properties": {
+    "project_id": {"type": "string"},
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "updated_at_utc": {"type": "string", "format": "date-time"},
+    "phase": {"type": "string", "enum": ["REQUIREMENTS", "ARCHITECTURE", "IMPLEMENTATION", "UNIT_TEST", "FUNCTIONAL_TEST", "CORE_SOLUTION_REVIEW", "DASHBOARD_SPEC", "DASHBOARD_IMPL", "DASHBOARD_ANALYSIS", "FINAL_ACCEPTANCE", "DONE", "BLOCKED"]},
+    "tasks": {
+      "type": "array",
+      "items": {"type": "string", "description": "path to task JSON under tasks/"}
+    },
+    "artifacts": {"type": "object", "description": "map of artifact kind -> path"},
+    "approval_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["gate", "approver", "status", "timestamp_utc"],
+        "properties": {
+          "gate": {"type": "string"},
+          "approver": {"type": "string"},
+          "status": {"type": "string", "enum": ["APPROVED", "REJECTED", "CONDITIONAL"]},
+          "evidence_path": {"type": "string"},
+          "conditions": {"type": "array", "items": {"type": "string"}},
+          "timestamp_utc": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "open_defects": {"type": "array", "items": {"type": "string"}},
+    "change_requests": {"type": "array", "items": {"type": "string"}},
+    "last_handoff": {"type": "string", "description": "path to the most recent handoff JSON"}
+  }
+}

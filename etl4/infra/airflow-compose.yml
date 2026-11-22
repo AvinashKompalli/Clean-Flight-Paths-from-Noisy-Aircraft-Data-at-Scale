@@ -1,0 +1,31 @@
+# Single-container Apache Airflow 2.9 in standalone mode.
+# Separate compose file so we can bring the orchestrator up/down without
+# touching the main stack. Port 8085 on the host (8080 is Spark master).
+#
+# Bring up:   docker compose -f etl4/infra/airflow-compose.yml up -d
+# Password:   docker exec etl4-airflow cat /opt/airflow/simple_auth_manager_passwords.json.generated 2>/dev/null \
+#          || docker exec etl4-airflow cat /opt/airflow/standalone_admin_password.txt
+services:
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    container_name: etl4-airflow
+    ports:
+      - "8085:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      _PIP_ADDITIONAL_REQUIREMENTS: "psycopg[binary]==3.2.1 pandas==2.2.2 pyarrow==16.1.0 python-dotenv==1.0.1 PyYAML==6.0.2 requests==2.32.3"
+      POSTGRES_DSN: "postgresql://etl4:change_me@host.docker.internal:5432/etl4"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../orchestration/dags:/opt/airflow/dags:ro
+      - ../..:/opt/project
+      - airflow-home:/opt/airflow
+    user: "50000:0"
+    command: standalone
+    restart: unless-stopped
+
+volumes:
+  airflow-home:

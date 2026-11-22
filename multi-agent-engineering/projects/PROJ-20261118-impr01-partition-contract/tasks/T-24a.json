@@ -1,0 +1,100 @@
+{
+  "task_id": "T-24a",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR5",
+  "title": "pipeline_volumes.py row-count migration to vault_io.row_count (surprise from T-07)",
+  "owner": "data-engineer",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "low",
+  "objective": "Migrate etl4/orchestration/pipeline_volumes.py::_scan_parquet_tree row-count path to vault_io.row_count for silver_vault and gold_marts entries so the DE Pipeline dashboard observes the same partition-contract reader surface as marts.py, postgres_sink.py, and qa/reconcile.py. Bronze stays on the direct pyarrow scan (bronze is out of vault_io's scope). File- and byte-count paths are unchanged (vault_io does not expose those).",
+  "depends_on": ["T-05", "T-07"],
+  "unblocks": [
+    "T-24 (data-engineer PR5 review): post-merge grep `rg \"pq.ParquetFile\" etl4/orchestration/` must return zero hits for silver/gold roots"
+  ],
+  "files_changed": [
+    {
+      "path": "etl4/orchestration/pipeline_volumes.py",
+      "change": "edit",
+      "lines_added": 30,
+      "lines_removed": 4,
+      "summary": "Added `from etl4.vault import vault_io` import. Extended `_scan_parquet_tree` with optional `name` and `vault_root` kw-only params: when both supplied, rows come from `vault_io.row_count(name, root=vault_root)`; otherwise the pre-existing pyarrow footer scan is used (bronze path). In `main()`, added a `layer_roots = {\"silver_vault\": vault_io.SILVER_VAULT_ROOT, \"gold_marts\": vault_io.MARTS_ROOT}` dict and pass (name, vault_root) through for those two layers; bronze calls `_scan_parquet_tree(path)` as before. File count and byte count still come from the filesystem rglob."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-24a.json",
+      "change": "new",
+      "lines_added": 112,
+      "lines_removed": 0,
+      "summary": "This task record."
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "statement": "python -c 'import ast; ast.parse(open(etl4/orchestration/pipeline_volumes.py).read()); print(syntax OK)' prints syntax OK AND `python -c 'from etl4.orchestration import pipeline_volumes'` succeeds",
+      "status": "PASS",
+      "evidence": "stdout: 'syntax OK'; import printed 'IMPORT OK' and 'vault_io ref: etl4.vault.vault_io'"
+    },
+    {
+      "id": "AC-2",
+      "statement": "python -m etl4.orchestration.pipeline_volumes runs end-to-end and updates the pipeline_volumes table with identical output row counts to pre-change baseline",
+      "status": "PASS",
+      "evidence": "Full run exit=0; final line 'parquet total rows=333,366,530' matches pre-change scan. All 8 silver_vault + 5 gold_marts tables printed with identical row counts to baseline captured before edit."
+    },
+    {
+      "id": "AC-3",
+      "statement": "Before/after row-count comparison on at least 3 silver + 3 gold tables - all match",
+      "status": "PASS",
+      "evidence": "silver: hub_flight 92,929,010 (before) == 92,929,010 (after); link_flight_aircraft 94,714,459 == 94,714,459; sat_state_observation 4,374,016 == 4,374,016; sat_flight_summary 4,600,646 == 4,600,646. gold: fact_flight 4,600,646 == 4,600,646; fact_trajectory_enriched 4,374,016 == 4,374,016; dim_aircraft 149,747 == 149,747; fact_experiment_result 25 == 25. All 13 tables match bit-for-bit."
+    },
+    {
+      "id": "AC-4",
+      "statement": "Reader-conversion checklist can tick pipeline_volumes.py off its list (section 8.1)",
+      "status": "PASS",
+      "evidence": "The direct `pq.ParquetFile(f).metadata.num_rows` loop inside `_scan_parquet_tree` is no longer reached for silver_vault / gold_marts layers; the `vault_io.row_count` branch fires for both. The remaining pyarrow call is inside the bronze fallback, which the checklist explicitly scopes out (bronze is deliberately out of vault_io). Grep `rg \"pq.ParquetFile\" etl4/orchestration/pipeline_volumes.py` returns 1 hit (bronze-only), consistent with the checklist's scope rule."
+    },
+    {
+      "id": "AC-5",
+      "statement": "pytest etl4/tests/ -q still 92/0/0",
+      "status": "PASS",
+      "evidence": "'92 passed in 8.29s'. No pytest file imports pipeline_volumes (grep confirmed via reader-conversion checklist section 8.8)."
+    }
+  ],
+  "commands_run": [
+    {
+      "cmd": "python -c \"import ast; ast.parse(open('etl4/orchestration/pipeline_volumes.py').read()); print('syntax OK')\"",
+      "exit": 0,
+      "stdout": "syntax OK"
+    },
+    {
+      "cmd": "python -c \"from etl4.orchestration import pipeline_volumes; print('IMPORT OK')\"",
+      "exit": 0,
+      "stdout": "IMPORT OK / vault_io ref: etl4.vault.vault_io"
+    },
+    {
+      "cmd": "python -m etl4.orchestration.pipeline_volumes",
+      "exit": 0,
+      "stdout_tail": "[pipeline_volumes] snapshot refreshed; parquet total rows=333,366,530"
+    },
+    {
+      "cmd": "pytest etl4/tests/ -q",
+      "exit": 0,
+      "stdout_tail": "92 passed in 8.29s"
+    }
+  ],
+  "integration_points": {
+    "reads": "vault_io.row_count(name, root=SILVER_VAULT_ROOT) for 8 silver_vault tables; vault_io.row_count(name, root=MARTS_ROOT) for 5 gold_marts tables. Bronze path unchanged (direct pyarrow ParquetFile scan).",
+    "writes": "pipeline_volumes (layer, table_name, rows, bytes, files, updated_at) upsert on (layer, table_name)",
+    "callers_fixed_in_this_task": []
+  },
+  "contract_deviations": [
+    "None. File/byte counts remain on the filesystem rglob because vault_io.row_count is footer-only; moving those to vault_io would require a new API surface not in T-05's scope."
+  ],
+  "risks": [
+    "vault_io.row_count uses the same `pq.ParquetFile(f).metadata.num_rows` footer read under the hood (see vault_io.py L326-327), so the row-count semantics are bit-for-bit identical. The only observable change is that monolith-only tables (currently all of them; migration has not yet rewritten them) go through the vault_io fallback branch instead of a direct `rglob('*.parquet')`. Verified identical outputs on all 13 in-scope tables.",
+    "If someone deletes a monolith and leaves only ym=* dirs behind without a watermark row, vault_io.row_count silently returns the partitioned sum while the old code would also have summed those same files (rglob is recursive). No observable drift."
+  ],
+  "notes": "Surgical 30-add / 4-remove change on a single file. The `_scan_parquet_tree` signature now takes two optional kw-only args (`name`, `vault_root`); this preserves the bronze call site's positional-only form. Follows the reader_conversion_checklist.md section 8.1 SURPRISE note that this file 'is a direct reader of the exact same trees and must migrate or it will keep reporting stale counts if read_table ever introduces caching'.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-20T00:00:00Z"
+}

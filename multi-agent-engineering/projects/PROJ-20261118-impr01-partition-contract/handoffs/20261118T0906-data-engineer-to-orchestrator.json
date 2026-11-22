@@ -1,0 +1,123 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-ARCH",
+  "from_agent": "data-engineer",
+  "to_agent": "orchestrator",
+  "current_phase": "ARCHITECTURE",
+  "objective": "Produce implementation-ready architecture.md for IMPR-01 (partition contract + watermark-driven incremental refresh) against PO requirements.md and ADR 2026-11-13.",
+  "input_artifacts": [
+    "etl4/docs/decisions.md (ADR 2026-11-13 binding design, ADR 2026-11-14 NoiseTruth, ADR 2026-11-18 eval_mart)",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md (APPROVED)",
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json (upstream_design)",
+    "etl4/vault/raw_vault.py",
+    "etl4/vault/marts.py",
+    "etl4/sink/postgres.py",
+    "etl4/vault/postgres_sink.py",
+    "etl4/bench/run_matrix.py",
+    "etl4/run_e2e.py",
+    "etl4/infra/create_tables.sql",
+    "etl4/qa/reconcile.py",
+    "etl4/qa/validate.py",
+    "etl4/requirements.txt (pyarrow==24.0.0 pin)",
+    "data/bronze/flightlists/v23.00/ (filename format verification)"
+  ],
+  "expected_output": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md with BINDING status and all 18 FRs honoured.",
+  "dependencies": [],
+  "acceptance_criteria": [
+    "Component diagram shows before/after per layer",
+    "DDL for pipeline_watermarks is complete and idempotent",
+    "INSERT ON CONFLICT SQL for each sink target (dim_aircraft, fact_trajectory_enriched, fact_flight, dim_airport, pipeline_runs)",
+    "Task breakdown assigns 27 tasks across data-engineer, developer-backend, unit-tester, functional-tester",
+    "5-PR plan with explicit dependencies",
+    "Zero-reprocess migration script outlined (streamed via iter_batches; row-count equality gate)",
+    "Parallelizable workstream map produced",
+    "17 risks enumerated (4 ADR + 13 new from code read)",
+    "CLAUDE.md non-negotiables observed",
+    "All 6 PO Open Questions answered"
+  ],
+  "status": "APPROVED",
+  "evidence": {
+    "artifacts": [
+      "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md",
+      "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/state.json"
+    ],
+    "commands_run": [
+      "Read etl4/docs/decisions.md (ADR 2026-11-13 full body + 2026-11-18 tail)",
+      "Read requirements.md (PO APPROVED, 18 FRs, 17 NFRs, 18 ACs, 6 open questions)",
+      "Read etl4/vault/raw_vault.py, marts.py, postgres_sink.py",
+      "Read etl4/sink/postgres.py",
+      "Read etl4/bench/run_matrix.py",
+      "Read etl4/run_e2e.py (stage_eval_mart body)",
+      "Read etl4/infra/create_tables.sql",
+      "Read etl4/qa/reconcile.py (footer-only counts confirmed partition-safe)",
+      "Grep 'part.parquet|silver/vault|gold/marts' across etl4/ (13 files found; reader-conversion checklist in T-07)",
+      "Verify data/bronze/flightlists/v23.00/ filenames match flightlist_YYYYMMDD_YYYYMMDD.parquet",
+      "Verify etl4/requirements.txt pyarrow==24.0.0 pin (affects write_to_dataset basename/column behaviour; architecture pins pq.write_table per group)",
+      "advisor() consulted before writing architecture; corrections applied before draft",
+      "Write architecture.md (BINDING)",
+      "Edit state.json (phase=ARCHITECTURE, approval history appended)"
+    ],
+    "counts": {
+      "tasks": 27,
+      "prs": 5,
+      "risks": 17,
+      "follow_up_adrs_for_orchestrator": 4,
+      "fr_coverage_percent": 100
+    },
+    "architecture_sections": [
+      "0. Pre-flight: nine ADR corrections from the code read",
+      "1. Component diagram (before/after per layer)",
+      "2. Data contracts (pipeline_watermarks, fact_trajectory_enriched.ym, pipeline_runs.ym, partition layout, ym derivation helpers)",
+      "3. DDL - pipeline_watermarks",
+      "4. Per-sink INSERT ON CONFLICT SQL (staged pattern, dim_aircraft, fact_trajectory_enriched, pipeline_runs CTE for DO NOTHING + eval_results orphan prevention, fact_experiment_result view)",
+      "5. Task breakdown with assignments (27 tasks grouped by PR)",
+      "6. Migration script outline (streamed iter_batches, row-count gate, Postgres-side DDL)",
+      "7. Rewind primitive outline (vault, marts, sink, matrix, eval_mart, all)",
+      "8. Parallelizable workstream map",
+      "9. Risks (17 total, grouped ADR + new, plus follow-up ADR list)",
+      "10. CLAUDE.md non-negotiables observed",
+      "11. State / gate status",
+      "12. Answers to the 6 PO Open Questions"
+    ],
+    "data_contracts_summary": {
+      "pipeline_watermarks": "layer TEXT, table_name TEXT, last_ym TEXT CHECK regex, row_count BIGINT, updated_at TIMESTAMPTZ, PK(layer, table_name)",
+      "fact_trajectory_enriched": "ADD ym TEXT NOT NULL, backfill via to_char(to_timestamp(time), 'YYYY-MM'), idx_fact_traj_ym",
+      "pipeline_runs": "ADD ym TEXT NOT NULL, backfill from run_date, dedup existing duplicates, UNIQUE (ym, source, method, noise)",
+      "sink_pattern": "COPY to TEMP TABLE; INSERT ... SELECT DISTINCT ON (pk) ... ON CONFLICT (...) DO UPDATE SET ... COALESCE on nullable columns; watermark upsert in same txn",
+      "pipeline_runs_pattern": "WITH new_run AS (INSERT ... DO NOTHING RETURNING run_id) SELECT run_id FROM new_run - orphans eval_results prevented via caller gate on row is None",
+      "partition_writer": "pq.write_table per ym group to ym=YYYY-MM/part.parquet (NOT write_to_dataset which drops partition cols and uses UUID basenames under pyarrow 24)"
+    },
+    "pr_task_counts": {
+      "PR1_DDL_and_skeleton": "3 (T-01 DDL, T-21 rewind skeleton, T-22 drift-check skeleton)",
+      "PR2_vault": "10 (T-02..T-11; T-07 and T-11 are reviews)",
+      "migration": "2 (T-12 script, T-13 review) - runs between PR2 and PR3 merge",
+      "PR3_marts": "3 (T-14, T-15, T-16)",
+      "PR4_sink": "3 (T-17, T-18, T-19)",
+      "PR5_matrix_e2e_evalmart": "5 (T-20, T-21 full, T-22 full, T-23, T-24)",
+      "testing_cross_cutting": "3 (T-25 unit, T-26 e2e replay, T-27 rewind e2e)"
+    },
+    "workstreams": {
+      "parallel": "PR1 and PR4 can run in parallel; T-04 vault_io spec can drop ahead of PR2 so PR4 can code against a stub",
+      "sequential": "PR2 -> migration -> PR3 -> PR5",
+      "contention": "developer-backend is the single code owner; PR2 may split into PR2a (vault_io + watermark client + flightlist loop) and PR2b (compaction + sat_state_observation) if cadence slips"
+    },
+    "po_open_questions_answered": {
+      "OQ1_pareto_cardinality": "stays at 12 synthetic cells; v_pareto_frontier reads fact_experiment_result (per-source-method-noise); v_eval_mart_ym is a separate ym-grouped view for future dashboards",
+      "OQ2_matrix_rerun_semantics": "confirmed DO NOTHING + rewind; WI-1 NFR-05 superseded via follow-up ADR",
+      "OQ3_fact_flight_dim_airport_keys": "fact_flight ON CONFLICT (hk_flight) DO UPDATE; dim_airport ON CONFLICT (hk_airport) DO NOTHING; PR1 adds the missing PRIMARY KEY DDL to create_tables.sql",
+      "OQ4_eval_results_orphans": "CTE pattern - WITH new_run AS (INSERT ... DO NOTHING RETURNING run_id) ensures zero rows when conflict; eval_results insert gated on run_id is not None",
+      "OQ5_sat_state_ym_extraction": "confirmed pd.to_datetime(time, unit='s', utc=True).dt.strftime('%Y-%m'); floor(time/month_seconds) rejected (not calendar-aligned); single helper ym_from_epoch",
+      "OQ6_IMPR12_status": "deferred for orchestrator; architecture uses direct parquet-vs-parquet row-count + hash-set check in T-13 as NFR-03 instrument regardless of IMPR-12 status"
+    }
+  },
+  "risks": [
+    "GATE_MISMATCH: WI-1 closed at CONDITIONAL_ACCEPTANCE, state.json gate requires DONE. PO proceeded anyway (requirements APPROVED). Orchestrator confirmation requested; does not block ARCHITECTURE.",
+    "CODE_READ_FINDINGS: nine ADR corrections now encoded in architecture.md section 0 - COPY-has-no-ON-CONFLICT (staging required), reader fallback is not implemented in code (shared vault_io.py is a PR2 prerequisite), floor(time/month_seconds) wrong for sat_state_observation, pyarrow 24 write_to_dataset drops partition column, pipeline_runs UNIQUE migration needs dedup first, DROP TABLE on a view errors, denormalization staleness on fact_trajectory_enriched, write_run has latent TypeError masked by broad except, watermark-vs-filesystem check mis-specified in ADR.",
+    "ENOSPC_HISTORY: migration of 333M-row sat_state_observation monolith must stream via iter_batches(batch_size=1_000_000); row-count equality gate before monolith delete (T-13).",
+    "DEVBACKEND_CONTENTION: single code owner on PR2; mitigation documented (PR2a/PR2b split if cadence slips).",
+    "FOLLOW_UP_ADRS_REQUIRED: 4 new ADR entries needed after this wave (cross-month merge rule, denormalization staleness, SYN-* ym sentinel, WI-1 NFR-05 supersession). Listed in architecture.md section 9.3 for orchestrator to schedule."
+  ],
+  "next_action": "Orchestrator: (1) append APPROVED to approval_history for gate=ARCHITECTURE (already done in state.json); (2) resolve WI-1 gate mismatch (PO already proceeded, so either formalize CONDITIONAL_ACCEPTANCE-satisfies-gate or document the exception); (3) resolve IMPR-12 status for T-13 instrument (does not block kickoff); (4) dispatch developer-backend on PR1 (DDL T-01 + rewind/drift skeletons T-21/T-22) and PR4 (sink UPSERT T-17 + write_run CTE T-18) in parallel; (5) dispatch data-engineer on T-04 vault_io spec and T-07 reader-conversion checklist in parallel. See architecture.md section 5 (27-task breakdown) and section 8 (workstream map).",
+  "blocked_on": null,
+  "timestamp_utc": "2026-11-18T09:06:00Z"
+}

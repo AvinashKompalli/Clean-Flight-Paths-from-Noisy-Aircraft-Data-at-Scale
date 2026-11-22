@@ -1,0 +1,50 @@
+{
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "task_id": "T-001",
+  "from_agent": "product-owner",
+  "to_agent": "orchestrator",
+  "current_phase": "REQUIREMENTS",
+  "objective": "Formalize the business + functional + non-functional requirements and acceptance criteria for Work Item 1 (feature-metric matrix completion + Pareto frontier + scale study) and emit a complete Requirement Traceability Matrix.",
+  "input_artifacts": [
+    "ETL4 (3) (1).pdf",
+    "CLAUDE.md",
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/state.json",
+    "multi-agent-engineering/templates/requirements_template.md"
+  ],
+  "expected_output": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md with status=APPROVED, 100% traceability coverage.",
+  "dependencies": [],
+  "acceptance_criteria": [
+    "Every PDF §3 Feature Metric for Success has at least one FR",
+    "Every FR has at least one testable AC",
+    "RTM covers 100% of FRs with code module + test case mapping",
+    "Scope boundaries explicitly separate WI-1 from WI-2 and from the ADR implementation"
+  ],
+  "risks": [
+    "Open question on NoiseTruth persistence (in-memory vs disk) - decided default in-memory; DE to confirm",
+    "Open question on 50M scale-study volume feasibility for kinematic_smoothing - decided default skip-and-log; DE to confirm",
+    "Open question on deviation_prf1 flagged mask source - decided default wrap existing residual mask; DE to confirm",
+    "Dashboard 08 and scale_study scope may stretch the Day 1-3 budget; functional-tester sign-off is the gate"
+  ],
+  "status": "APPROVED",
+  "evidence": {
+    "artifacts": [
+      "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md"
+    ],
+    "commands_run": [
+      "Read ETL4 (3) (1).pdf sections 1-3 (parent conversation context)",
+      "Read CLAUDE.md (parent conversation context)",
+      "Read multi-agent-engineering/templates/requirements_template.md",
+      "Read multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/state.json",
+      "Write multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/requirements.md"
+    ],
+    "test_counts": {
+      "functional_requirements": 16,
+      "non_functional_requirements": 12,
+      "acceptance_criteria": 16,
+      "traceability_coverage_percent": 100
+    },
+    "notes": "All 16 FRs are PDF-sourced (either §3 Feature Metric, §3 Performance Metric, or §1 headline-question support). NFRs inherit from CLAUDE.md non-negotiables plus the user standing rule on token economy. Three open questions are explicitly marked as DE-to-confirm defaults, not blockers."
+  },
+  "next_action": "Orchestrator to append APPROVED to state.json approval_history (gate=REQUIREMENTS, approver=product-owner) and advance phase to ARCHITECTURE, dispatching data-engineer with requirements.md as the input artifact.",
+  "timestamp_utc": "2026-11-14T02:10:00Z"
+}

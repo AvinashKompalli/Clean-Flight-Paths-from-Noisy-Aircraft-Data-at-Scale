@@ -1,0 +1,66 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-02",
+  "from_agent": "developer-backend",
+  "to_agent": "orchestrator",
+  "current_phase": "IMPLEMENTATION",
+  "pr": "PR2",
+  "objective": "Implement etl4/vault/watermark.py: get(layer, table) -> Optional[str]; set(layer, table, last_ym, row_count, conn). set() requires an existing psycopg connection so the watermark advance shares the caller's transaction with the layer INSERT (architecture.md section 4.1).",
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md (section 4.1 shared-txn pattern; section 5 T-02 contract row)",
+    "etl4/infra/create_tables.sql (tail: pipeline_watermarks DDL landed by T-01 with CHECK regex ^[0-9]{4}-(0[1-9]|1[0-2])$)",
+    "etl4/sink/postgres.py (existing psycopg conn pattern + DSN env var convention)"
+  ],
+  "expected_output": "etl4/vault/watermark.py (new) + artifacts/t02_watermark_smoke.py (new); 6 acceptance criteria green; no test regressions.",
+  "status": "APPROVED",
+  "acceptance_criteria": [
+    {"id": "AC-1", "statement": "ast.parse prints 'syntax OK'", "status": "PASS"},
+    {"id": "AC-2", "statement": "from etl4.vault.watermark import get, set prints 'IMPORT OK'", "status": "PASS"},
+    {"id": "AC-3", "statement": "empty get -> None; set in txn -> value visible; malformed ym -> CheckViolation", "status": "PASS"},
+    {"id": "AC-4", "statement": "set() is idempotent (last_ym + row_count stable, updated_at monotonic)", "status": "PASS"},
+    {"id": "AC-5", "statement": "shared-txn set + sibling INSERT roll back atomically", "status": "PASS"},
+    {"id": "AC-6", "statement": "pytest etl4/tests/ -q = 34 pass, 0 fail", "status": "PASS"}
+  ],
+  "evidence": {
+    "files_changed": [
+      {"path": "etl4/vault/watermark.py", "lines_added": 91, "lines_removed": 0, "change": "new"},
+      {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t02_watermark_smoke.py", "lines_added": 217, "lines_removed": 0, "change": "new"}
+    ],
+    "commands_run": [
+      "python -c \"import ast; ast.parse(open('etl4/vault/watermark.py').read()); print('syntax OK')\" -> exit 0, stdout: 'syntax OK'",
+      "python -c \"from etl4.vault.watermark import get, set; print('IMPORT OK')\" -> exit 0, stdout: 'IMPORT OK'",
+      "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t02_watermark_smoke.py -> exit 0, stdout: 'WATERMARK SMOKE OK'",
+      "pytest etl4/tests/ -q -> exit 0, '34 passed in 5.79s'"
+    ],
+    "test_status": "green",
+    "ac_outputs_verbatim": {
+      "AC-1": "syntax OK",
+      "AC-2": "IMPORT OK",
+      "AC-3": "WATERMARK SMOKE OK (bootstrap None + post-set visibility + CheckViolation on '2022-7')",
+      "AC-4": "WATERMARK SMOKE OK (last_ym and row_count stable across repeat; updated_at second >= first)",
+      "AC-5": "WATERMARK SMOKE OK (mid-txn visible, post-rollback both absent, post-commit variant both present)",
+      "AC-6": "34 passed in 5.79s"
+    }
+  },
+  "integration_points": {
+    "reads": "SELECT last_ym FROM pipeline_watermarks WHERE (layer, table_name) in get()",
+    "writes": "INSERT ... ON CONFLICT (layer, table_name) DO UPDATE on pipeline_watermarks in set() -- caller owns commit",
+    "downstream_consumers": [
+      "T-17 etl4/vault/postgres_sink.py (same-txn watermark write alongside staged INSERT ON CONFLICT)",
+      "T-08 etl4/vault/raw_vault.py (per-ym build; get() determines resume point)",
+      "T-20 etl4/bench/run_matrix.py (watermark advance after matrix ym cells commit)",
+      "T-22 etl4/run_e2e.py (pre-flight filesystem vs watermark range check)",
+      "T-25 etl4/tests/test_pipeline.py (unit coverage for watermark client)"
+    ]
+  },
+  "contract_deviations": [],
+  "windows_cp1252_safe": true,
+  "risks": [
+    "set() shadows Python's builtin set at module scope -- documented in module docstring; __all__ keeps it explicit; callers must import the module, not the names (watermark.set(...)). Flagged for code review convention.",
+    "get() opens its own autocommit connection -- intentional for a pure SELECT; readers cross txn boundaries must see the committed state. Not a correctness concern for the staged UPSERT pattern.",
+    "DSN fallback 'postgresql://etl4:change_me@localhost:5432/etl4' carries 'change_me' placeholder; matches etl4/sink/postgres.py convention. Real credentials come from POSTGRES_DSN env var."
+  ],
+  "next_action": "Orchestrator: T-02 lands PR2 watermark-client slice. Unblocks T-17 (sink UPSERT same-txn watermark) + T-20 (matrix advance) + T-22 (pre-flight) + T-08 (vault per-ym build loop) + T-25 (unit tests). Can be dispatched now; T-17 is highest-value since it closes the parallel PR4 workstream.",
+  "blocked_on": null,
+  "timestamp_utc": "2026-11-18T09:24:00Z"
+}

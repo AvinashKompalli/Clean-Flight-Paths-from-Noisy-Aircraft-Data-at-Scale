@@ -1,0 +1,76 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-22",
+  "from_agent": "developer-backend",
+  "to_agent": "orchestrator",
+  "current_phase": "IMPLEMENTATION",
+  "pr": "PR5",
+  "objective": "run_e2e.py --ym propagation to stage_sink + stage_matrix; pre-flight filesystem-vs-watermark drift check over the 4 partitioned vault tables.",
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md sections 5 (T-22), 8 (drift note), 2.5 (ym helper contract)",
+    "etl4/vault/watermark.py (T-02)",
+    "etl4/vault/vault_io.py (T-05, list_ym)",
+    "etl4/vault/postgres_sink.py (T-17, --ym required)",
+    "etl4/bench/run_matrix.py (T-20, --ym required for s3|zenodo|rest, synthetic auto-defaults)"
+  ],
+  "status": "APPROVED",
+  "acceptance_criteria": [
+    {"id": "AC-1 syntax", "status": "PASS", "stdout": "syntax OK"},
+    {"id": "AC-2 synthetic matrix", "status": "PASS", "note": "ym auto-defaults to SYN-002A inside run_matrix; elapsed 2.5s; run_id=87 cell existed, skipped as designed"},
+    {"id": "AC-3 s3 sink without --ym", "status": "PASS", "note": "argparse error 'run_e2e.py: error: --ym required when --source is one of s3|zenodo|rest'; exit=2"},
+    {"id": "AC-4 clean drift pass", "status": "PASS", "note": "Live Postgres + empty vault filesystem returns without SystemExit"},
+    {"id": "AC-5 drift planted ym", "status": "PASS", "note": "Three scenarios covered in t22_run_e2e_smoke.py: (1) fs ym dirs with no watermark row; (2) watermark with empty fs; (3) hole in contiguous range"},
+    {"id": "AC-6 pytest 92/0/0", "status": "PASS", "stdout": "92 passed in 7.87s"},
+    {"id": "AC-7 cp1252-safe", "status": "PASS", "note": "source decodes under cp1252; no arrows / em-dashes"}
+  ],
+  "evidence": {
+    "files_changed": [
+      {"path": "etl4/run_e2e.py", "lines_added": 184, "lines_removed": 18, "change": "edit", "note": "git diff --numstat"},
+      {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t22_run_e2e_smoke.py", "lines_added": 250, "lines_removed": 0, "change": "new", "note": "wc -l"},
+      {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-22.json", "lines_added": 136, "lines_removed": 0, "change": "new", "note": "wc -l"}
+    ],
+    "commands_run": [
+      {"cmd": "python -c \"import ast; ast.parse(open('etl4/run_e2e.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+      {"cmd": "python etl4/run_e2e.py --source s3 --only sink", "exit": 2, "stderr": "run_e2e.py: error: --ym required when --source is one of s3|zenodo|rest"},
+      {"cmd": "python etl4/run_e2e.py --source synthetic --only matrix --profiles N0 --methods time_gap", "exit": 0, "note": "AC-2 verbatim. 14,400 bronze rows; ym=SYN-002A auto-default from run_matrix; elapsed 2.2s"},
+      {"cmd": "plant real-path ym=2099-01 under data/silver/vault/hub_flight/ + run --only matrix synthetic", "exit": 1, "note": "AC-5 real-path: stderr 'watermark drift: table=hub_flight has 1 ym dirs on disk but no watermark row'; cleanup OK"},
+      {"cmd": "python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/t22_run_e2e_smoke.py", "exit": 0, "stdout": "AC-2 OK ... AC-2b OK ... helper OK ... AC-4 OK ... AC-5 OK ... AC-5b OK ... AC-5c OK ... T22_SMOKE OK"},
+      {"cmd": "pytest etl4/tests/ -q", "exit": 0, "note": "92 passed in 7.94s"}
+    ]
+  },
+  "integration_points": {
+    "reads": "pipeline_watermarks (via etl4.vault.watermark.get); data/silver/vault/<table>/ym=* (via vault_io.list_ym)",
+    "writes": "stage_sink -> postgres_sink -> pipeline_watermarks + dim_aircraft + fact_trajectory_enriched; stage_matrix -> run_matrix -> pipeline_runs + pipeline_watermarks('matrix','pipeline_runs')",
+    "callers_fixed_in_this_task": [
+      "stage_sink forwards --ym (fixes PR4 argparse error)",
+      "stage_matrix forwards --ym + --source + --methods + --workers (fixes T-20 argparse error)"
+    ]
+  },
+  "contract_deviations": [
+    "Drift check runs after stage_infra + stage_schema when in run set (not strictly 'top of main()'); rationale: pipeline_watermarks lives in Postgres brought up by stage_infra and created by stage_schema. Argparse validation still fires at the top. --skip-drift-check escape hatch added.",
+    "Added --methods and --workers CLI args to run_e2e (not in dispatch literal, but required to forward through to run_matrix for AC-2 and to match T-20 evidence pattern).",
+    "--bronze default changed from hardcoded 'data/bronze/raw_states' to per-source resolution (synthetic -> data/bronze/synthetic, else raw_states)."
+  ],
+  "under_specification_resolved": [
+    "'--source choices' - dispatch mentioned s3|zenodo|rest|synthetic but run_e2e only had zenodo|live. Expanded to {zenodo, live, s3, rest, synthetic}. stage_ingest refuses s3/rest/synthetic with actionable argparse error.",
+    "'live mapping' - run_matrix does not know 'live'; when --source=live is combined with stage_matrix, matrix_source falls back to 'zenodo' AND argparse requires --ym (because mapped source is in REAL_SOURCES). Without this guard, run_matrix would reject the invocation mid-run. Preserves pre-T-22 behavior where stage_matrix always hardcoded zenodo, but now with fail-fast validation.",
+    "'sink requires calendar ym' - synthetic sink would be meaningless (postgres_sink DDL CHECK rejects SYN-*). Added explicit argparse-layer rejection when 'sink' is in run and --ym is missing or SYN-*.",
+    "'drift check sat_state_observation' - dispatch spec enumerates 4 tables (hub_flight, link_flight_aircraft, link_flight_route, sat_flight_summary); vault_io.PARTITIONED_TABLES has sat_state_observation too. Followed dispatch; flagged in RISKS for T-24 review."
+  ],
+  "test_status": "green (92/0/0)",
+  "unblocks": [
+    "T-24 (data-engineer review of PR5 run_e2e wiring)",
+    "T-26 (functional-tester E2E replay)",
+    "T-27 (rewind E2E)"
+  ],
+  "risks_known_limits": [
+    "stage_ingest refuses s3/rest/synthetic (ingest_runner.py only knows zenodo|live|replay). Operator must use --only / --skip ingest.",
+    "Drift check uses broad `except Exception` wrapping into informative SystemExit referencing --skip-drift-check. Real OperationalError / UndefinedTable is still surfaced in the message; not silently swallowed.",
+    "Postgres must be reachable for every run unless --skip-drift-check is passed. Pre-T-22 synthetic matrix-only could run without Postgres (T-20 evidence). Change is per dispatch spec; --skip-drift-check escape hatch documented in --help.",
+    "VAULT_PARTITIONED_TABLES is the 4-table subset per dispatch; sat_state_observation is NOT in the drift check. Intentional per spec but worth confirming in T-24.",
+    "No change to stage_eval_mart (operates across all months per dispatch); it continues to read pipeline_runs globally."
+  ],
+  "next_action": "data-engineer T-24 review of PR5 (T-20 + T-21 + T-22 + T-23 as they land)",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-19T00:30:00Z"
+}

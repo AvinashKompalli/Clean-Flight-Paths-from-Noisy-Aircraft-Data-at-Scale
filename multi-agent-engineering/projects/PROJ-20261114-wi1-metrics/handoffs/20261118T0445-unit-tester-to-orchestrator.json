@@ -1,0 +1,37 @@
+{
+  "from_agent": "unit-tester",
+  "to_agent": "orchestrator",
+  "task_id": "FIX-DEF-002",
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "timestamp_utc": "2026-11-18T04:45:00Z",
+  "status": "APPROVED",
+  "tests_added": 0,
+  "tests_modified": 1,
+  "tests_run": {"passed": 34, "failed": 0, "skipped": 0},
+  "regressions": 0,
+  "summary": "DEF-002 closed. The skipif probe in etl4/tests/test_noise_truth.py now calls generate_synthetic(10, seed=42) instead of make_flight(...). Test body also switched to generate_synthetic(500, seed=42) since make_flight itself does not emit __truth_id. test_synthetic_truth_id_is_monotonic_unique_int64 now runs in CI and asserts the T-002 invariant (monotonic, unique, int64). Full suite: 34 passed, 0 skipped, 0 failed.",
+  "diff": {
+    "file": "etl4/tests/test_noise_truth.py",
+    "probe_before": "df = make_flight(rng, 'abc123', 1_000_000, 5, 10); return TRUTH_ID in df.columns",
+    "probe_after": "df = generate_synthetic(10, seed=42); return TRUTH_ID in df.columns",
+    "body_before": "df = make_flight(rng, 'abc123', 1_000_000, 50, 10)",
+    "body_after": "df = generate_synthetic(500, seed=42)"
+  },
+  "pytest_tails": {
+    "noise_truth_file": "etl4/tests/test_noise_truth.py::test_synthetic_truth_id_is_monotonic_unique_int64 PASSED [100%]\n============================= 10 passed in 1.26s ==============================",
+    "full_suite": "..................................                                       [100%]\n34 passed in 5.49s"
+  },
+  "ac_coverage_delta": {
+    "AC-02": "PASS_LIVE_BUT_TEST_SKIPPED -> PASS (test now runs and asserts __truth_id invariant in CI)"
+  },
+  "files_touched": [
+    "etl4/tests/test_noise_truth.py"
+  ],
+  "files_not_touched": [
+    "etl4/ingest/synthetic.py",
+    "etl4/bench/noise.py",
+    "any production source",
+    "any other test file"
+  ],
+  "next_action": "ready for product-owner sign-off on AC-02; DEF-002 fully resolved"
+}

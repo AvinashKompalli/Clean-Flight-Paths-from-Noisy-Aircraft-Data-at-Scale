@@ -1,0 +1,48 @@
+{
+  "task_id": "T-18",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR4",
+  "title": "Update etl4/sink/postgres.py::write_run - CTE DO NOTHING + ym kwarg",
+  "owner": "developer-backend",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "high",
+  "objective": "Rewrite write_run so pipeline_runs INSERT uses the architecture.md section 4.4 CTE: ON CONFLICT (ym, source, method, noise) DO NOTHING RETURNING run_id, with a UNION ALL follow-up SELECT so callers receive the pre-existing run_id on skip. eval_results and deviation_events only populate on a NEWLY created run (no orphans; no accumulation).",
+  "depends_on": ["T-01"],
+  "blocked_by_sibling_task": "T-16 (pipeline_runs.ym column + UNIQUE constraint). Not required to merge T-18 - the code fails informatively (psycopg.errors.UndefinedColumn) when the migration has not run. Smoke _t18() adds the column + constraint itself and tears them down, so it can run before T-16 lands.",
+  "unblocks": [
+    "T-19 (SQL review)",
+    "T-20 (run_matrix must pass ym= to write_run)"
+  ],
+  "files_changed": [
+    {"path": "etl4/sink/postgres.py", "change": "edit", "lines_added": 96, "lines_removed": 21},
+    {"path": "etl4/tests/test_pipeline.py", "change": "edit", "lines_added": 4, "lines_removed": 0, "note": "test_matrix_csv_written_after_every_cell: stubs rm.write_run so the test's matrix-crash-safety invariant is independent of Postgres schema state (the old broad-except behavior silently absorbed the sink error; the new write_run propagates schema-level exceptions per architecture 4.4)."}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "statement": "python -c 'import ast; ast.parse(...); print(syntax OK)' prints syntax OK", "status": "PASS", "evidence": "stdout: 'syntax OK'"},
+    {"id": "AC-2", "statement": "python -c 'from etl4.sink.postgres import write_run; print(IMPORT OK)' prints IMPORT OK", "status": "PASS", "evidence": "stdout: 'IMPORT OK'"},
+    {"id": "AC-3", "statement": "pytest etl4/tests/ -q => 49/0/0 (no regressions)", "status": "PASS", "evidence": "'49 passed in 7.26s'"},
+    {"id": "AC-5", "statement": "Smoke: write_run called twice with identical (ym, source, method, noise) - second call returns first's run_id AND does not insert a duplicate row", "status": "NOT_RUN_SANDBOX_BLOCKED", "evidence": "pr4_sink_smoke.py _t18() is ready to run and independently verified by code read, but auto-mode classifier denied execution because the script issues ALTER TABLE to simulate the T-16 migration. CODE PATH VERIFIED by inspection: the CTE SELECT ... UNION ALL ... WHERE NOT EXISTS SELECT 1 FROM new_run returns (existing_run_id, FALSE) when the INSERT no-ops; eval_results + deviation_events writes are gated on `created` being TRUE. Manual execution: `python multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/pr4_sink_smoke.py`"}
+  ],
+  "commands_run": [
+    {"cmd": "python -c \"import ast; ast.parse(open('etl4/sink/postgres.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+    {"cmd": "python -c \"from etl4.sink.postgres import write_run; print('IMPORT OK')\"", "exit": 0, "stdout": "IMPORT OK"},
+    {"cmd": "pytest etl4/tests/ -q", "exit": 0, "note": "49 passed in 7.26s"},
+    {"cmd": "python <smoke script> _t18()", "exit": "DENIED_BY_CLASSIFIER", "note": "ALTER TABLE calls to simulate the unmerged T-16 migration flagged as 'destructive'. Classifier permission is a sandbox policy; the smoke code is ready."}
+  ],
+  "integration_points": {
+    "reads": "pipeline_runs (ON CONFLICT lookup + UNION ALL fallback SELECT)",
+    "writes": "pipeline_runs (one new row OR zero on conflict); eval_results (one row per metric, only on new); deviation_events (one row per dev, only on new)",
+    "consumers": [
+      "etl4/bench/run_matrix.py (will pass ym under T-20 rewire)",
+      "etl4/run_pipeline.py:69 (does not yet pass ym; _resolve_ym falls back to metrics['run_date'] month, which was the pre-IMPR-01 implicit behavior - safe)"
+    ]
+  },
+  "contract_deviations": [
+    "None against architecture.md section 4.4 CTE shape."
+  ],
+  "notes": "Fault-tolerant catch preserved: psycopg.OperationalError on connect (dev without Docker up) returns None with a log line. Schema-level errors (UndefinedColumn on missing ym, UndefinedObject on missing UNIQUE) propagate so operators see the missing T-16 migration. _resolve_ym precedence: explicit kwarg > metrics['ym'] > month-of metrics['run_date'] > utcnow month. Synthetic callers must pass ym='SYN-<seed>' explicitly (architecture 2.3); _resolve_ym does NOT invent a sentinel.",
+  "test_patch_rationale": "test_matrix_csv_written_after_every_cell targets matrix.csv crash-safety (plan.md section 13). It monkeypatched _worker but not write_run; the old broad-except in write_run masked the fact that the test's Postgres has no ym column. Now that schema errors propagate (per architecture 4.4), the test must stub write_run to the sink to stay focused on its stated invariant. Not removal, not rename - no decisions.md entry needed per CLAUDE.md section 3.8.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-18T17:00:00Z"
+}

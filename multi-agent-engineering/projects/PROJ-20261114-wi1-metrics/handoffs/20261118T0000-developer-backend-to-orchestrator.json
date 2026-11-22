@@ -1,0 +1,72 @@
+{
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "task_id": "T-004",
+  "from_agent": "developer-backend",
+  "to_agent": "orchestrator",
+  "phase": "IMPLEMENTATION",
+  "timestamp_utc": "2026-11-18T00:00:00Z",
+  "status": "APPROVED",
+  "files_changed": [
+    {
+      "path": "etl4/infra/create_tables.sql",
+      "change": "appended",
+      "lines_added": 36,
+      "lines_removed": 0,
+      "summary": "scale_runs CREATE TABLE IF NOT EXISTS (13 cols, aligned to T-005's in-module DDL) + three indexes (method, volume, recorded_at DESC) + v_pareto_frontier CREATE OR REPLACE VIEW (5 cols, filters rmse_m IS NOT NULL AND wall_secs IS NOT NULL)"
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/tasks/T-004.json",
+      "change": "created",
+      "summary": "T-004 task card with completion status and contract deviation notes"
+    }
+  ],
+  "integration_points": {
+    "reads": ["public.fact_experiment_result (view source)"],
+    "writes": [
+      "public.scale_runs (schema; rows written by etl4/bench/scale_study.py)",
+      "public.v_pareto_frontier (view; queried by dashboard 08_accuracy_cost.json in T-006)"
+    ]
+  },
+  "commands_run": [
+    {"cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 < etl4/infra/create_tables.sql (run 1)", "exit": 0},
+    {"cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 < etl4/infra/create_tables.sql (run 2)", "exit": 0},
+    {"cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c '\\d scale_runs'", "exit": 0},
+    {"cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c '\\d v_pareto_frontier'", "exit": 0},
+    {"cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c 'SELECT COUNT(*) FROM v_pareto_frontier;'", "exit": 0}
+  ],
+  "verification_outputs": {
+    "second_apply_tail": "CREATE TABLE\nNOTICE:  relation \"scale_runs\" already exists, skipping\nNOTICE:  relation \"idx_scale_runs_method\" already exists, skipping\nCREATE INDEX\nNOTICE:  relation \"idx_scale_runs_volume\" already exists, skipping\nCREATE INDEX\nNOTICE:  relation \"idx_scale_runs_recorded\" already exists, skipping\nCREATE INDEX\nCREATE VIEW\n---EXIT:0---",
+    "scale_runs_describe": "13 columns: scale_run_id BIGINT PK (nextval seq), recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(), data_volume_rows BIGINT NOT NULL, source TEXT NOT NULL, method TEXT NOT NULL, noise TEXT NOT NULL, wall_secs DOUBLE PRECISION, rows_per_sec DOUBLE PRECISION, peak_rss_mb BIGINT, shuffle_mb BIGINT, engine TEXT NOT NULL, seed INTEGER NOT NULL DEFAULT 42, notes TEXT. Indexes: scale_runs_pkey (btree scale_run_id), idx_scale_runs_method (btree method), idx_scale_runs_recorded (btree recorded_at DESC), idx_scale_runs_volume (btree data_volume_rows)",
+    "v_pareto_frontier_describe": "5 columns: method TEXT, noise TEXT, accuracy_y DOUBLE PRECISION, cost_x DOUBLE PRECISION, efficiency DOUBLE PRECISION",
+    "view_rowcount": "0 (expected pre-T-003; current fact_experiment_result has NULL rmse_m everywhere)"
+  },
+  "contract_deviations": [
+    {
+      "object": "scale_runs",
+      "flavour": "task-text spec vs running T-005 implementation",
+      "issue": "Task text specified DEFAULT 's3' / 'N0' / 'pandas' on source/noise/engine and column order with recorded_at last. T-005's running defensive DDL has NOT NULL without DEFAULT and places recorded_at second. Aligned to T-005 per task instruction 'if T-005 used a slightly different name or type, align this DDL to T-005'. No behavioural impact: T-005 INSERT always supplies those three columns.",
+      "resolution": "applied-as-T-005"
+    },
+    {
+      "object": "scale_runs",
+      "flavour": "index addition",
+      "issue": "Task-text included idx_scale_runs_recorded ON scale_runs(recorded_at DESC) which T-005 did not create.",
+      "resolution": "kept (additive, non-conflicting). Index now exists on the live table."
+    },
+    {
+      "object": "v_pareto_frontier",
+      "flavour": "architecture.md vs task-text",
+      "issue": "architecture.md includes n_flights, continuity columns and only the rmse_m IS NOT NULL filter. Task-text SQL omits those two columns and adds AND wall_secs IS NOT NULL. Followed task-text exactly as written in the prompt.",
+      "resolution": "applied-as-task-spec; flagged for T-006 dashboard scoping. If the heatmap/table panel in dashboard 08 needs n_flights or continuity it must query fact_experiment_result directly rather than v_pareto_frontier."
+    }
+  ],
+  "test_status": "not-run",
+  "test_notes": "Task is pure DDL; no unit tests invoked. Idempotence of the SQL file is the correctness criterion and was verified by two back-to-back applies with exit 0.",
+  "next_action": "T-006 (dashboard 08_accuracy_cost.json) is unblocked. View returns 0 rows until T-003 populates rmse_m / wall_secs non-NULL on synthetic cells; dashboard panels should degrade gracefully.",
+  "risks": [
+    "View exposes 5 cols; architecture.md indicates 7. If T-006 or later consumers depend on n_flights / continuity from the view, DDL will need an amendment ADR.",
+    "Pre-T-003, v_pareto_frontier is empty; dashboard panels wired to it will render blank until synthetic cells land."
+  ],
+  "windows_cp1252_safe": true,
+  "secrets_scan": "clean (DDL only; no credentials)"
+}

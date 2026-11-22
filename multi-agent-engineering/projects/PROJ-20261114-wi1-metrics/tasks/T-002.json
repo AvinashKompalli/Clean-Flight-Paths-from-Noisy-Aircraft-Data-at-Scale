@@ -1,0 +1,29 @@
+{
+  "task_id": "T-002",
+  "project_id": "PROJ-20261114-wi1-metrics",
+  "assigned_agent": "developer-backend",
+  "title": "Emit stable __truth_id in synthetic.py and round-trip it through clean + ordering + reconstruct",
+  "description": "Add a monotonic int64 `__truth_id` column emission to etl4/ingest/synthetic.py (both the new in-memory `generate_synthetic(n_rows, seed)` helper and the main CLI bronze write). Add a dedup tiebreaker in etl4/clean/clean.py so the lower `__truth_id` wins on `(icao24, time)` collisions when the column is present (no-op on real-data path). Ship a round-trip smoke script that drives synthetic -> inject_noise(N2) -> project_raw -> clean -> event_time_order -> all three reconstruct methods and asserts id preservation, surviving-set membership, and 1:1 correspondence with ground truth.",
+  "prerequisites": ["T-001"],
+  "input_artifacts": [
+    "multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/architecture.md",
+    "etl4/docs/decisions.md",
+    "etl4/bench/noise.py"
+  ],
+  "expected_output": "etl4/ingest/synthetic.py emits __truth_id; etl4/clean/clean.py has lower-wins dedup tiebreaker; multi-agent-engineering/projects/PROJ-20261114-wi1-metrics/artifacts/t002_roundtrip.py prints ROUND-TRIP OK",
+  "acceptance_criteria": [
+    "generate_synthetic(50, seed=42) returns a DataFrame with __truth_id monotonic+unique; prints EMIT OK",
+    "artifacts/t002_roundtrip.py prints ROUND-TRIP OK: 500 input, N output, N surviving ids match",
+    "pytest etl4/tests/test_pipeline.py shows 19 passed, 1 pre-existing fail; zero new regressions",
+    "clean.clean dedup tiebreaker is a no-op when __truth_id absent (manual smoke verified)",
+    "Windows cp1252-safe stdout",
+    "No new runtime deps",
+    "no commits performed"
+  ],
+  "priority": "high",
+  "status": "COMPLETED",
+  "retry_count": 0,
+  "retry_limit": 2,
+  "created_at_utc": "2026-11-14T02:13:00Z",
+  "updated_at_utc": "2026-11-14T22:30:00Z"
+}

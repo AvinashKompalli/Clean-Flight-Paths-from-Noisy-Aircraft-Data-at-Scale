@@ -1,0 +1,111 @@
+{
+  "from_agent": "data-engineer",
+  "to_agent": "orchestrator",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "task_id": "T-04-07",
+  "phase": "IMPLEMENTATION",
+  "status": "APPROVED",
+  "timestamp_utc": "2026-11-18T09:19:00Z",
+  "deliverables": [
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/vault_io_spec.md",
+      "kind": "spec",
+      "sections": 9,
+      "public_api_methods": 9,
+      "summary": "Full Python signatures + docstrings for read_table, write_partition, row_count, list_ym, ym_from_filename, ym_from_date, ym_from_epoch, extract_ym_from_frame, extract_ym_from_path; four-case reader fallback contract (monolith-only, partitioned-only, mixed, empty); partition layout quote-through of architecture.md §2.4; ym truth table from §2.5; non-goals explicit (no dedup, no watermark I/O, no Postgres, no bronze, no GE, no event-time sort). T-05 acceptance criteria enumerated for developer-backend."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/reader_conversion_checklist.md",
+      "kind": "checklist",
+      "files_covered": 8,
+      "in_scope_call_sites": 20,
+      "out_of_scope_call_sites_flagged": 11,
+      "surprise_sites": 1,
+      "summary": "Per-site table (file / line / current call / target call / note) for every pd.read_parquet / rglob / ParquetFile call site. In-scope = reads under data/silver/vault/** or data/gold/marts/**. Out-of-scope sites (bronze, silver/cleaned_states, reference, tests) are enumerated so no reader escapes review. Post-PR5 enforcement grep included."
+    },
+    {
+      "path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-04-07.json",
+      "kind": "task_record"
+    }
+  ],
+  "architecture_gaps_resolved": [
+    "Empty-table return contract: return pd.DataFrame() (no cols), not raise FileNotFoundError. Matches current marts._read behaviour; justified against caller patterns in vault/marts.py build_* functions.",
+    "Mixed-layout precedence: partitioned wins over monolith when both are present. Not covered by architecture.md directly; derived from migration-script idempotence check (`if any(tbl.glob('ym=*')): status='already_partitioned'`).",
+    "Spark writer filename accommodation: read_table globs <ym_dir>/*.parquet (not just part.parquet) so the raw_vault_spark.py Spark emit (part-00000-*.parquet) reads transparently. Documented as reader extension in spec section 6.",
+    "Concurrent-write race: write_partition uses .part.parquet.<pid>.tmp + os.replace; last-writer-wins, no half-file visible. Defence-in-depth for future per-month-per-worker schemes.",
+    "Column pushdown is mandatory for sat_state_observation read (333M rows); spec names STATE_COLS list."
+  ],
+  "surprise_call_sites": [
+    {
+      "file": "etl4/orchestration/pipeline_volumes.py",
+      "lines": [70, 75, 76, 77],
+      "issue": "Scans silver/vault and gold/marts trees for the DE dashboard; not listed in architecture.md section 1.3 'Modules changed' table.",
+      "recommendation": "Add T-24a: migrate _scan_parquet_tree row-count to vault_io.row_count for silver_vault/gold_marts entries in PARQUET_TARGETS. Owner data-engineer, ~10 LOC, PR5."
+    }
+  ],
+  "architecture_correction_counts": {
+    "marts.py_sites_reported_vs_actual": "architecture said 6; actual = 9 read + 4 write = 13 entries. Over-counting is safe; checklist enumerates all.",
+    "raw_vault.py_sites_reported_vs_actual": "architecture said 3; actual = 1 writer helper (split path) + 1 resume-count SQL swap. Bronze reads (6 sites) explicitly out of scope and flagged.",
+    "reconcile.py_target": "architecture said 0 direct calls after switch - holds only for silver/mart counts; bronze _count_rows remains with an in-line comment."
+  },
+  "blockers_removed_for": [
+    "T-05 (developer-backend implements vault_io.py)",
+    "T-08/T-09/T-10 (raw_vault.py rewrite writer paths)",
+    "T-14 (marts.py rewrite)",
+    "T-17 (postgres_sink.py staged INSERT ON CONFLICT reader path)",
+    "T-22 (run_e2e drift check)"
+  ],
+  "blocked_on": null,
+  "next_action": "Dispatch T-05 (developer-backend: implement vault_io.py against vault_io_spec.md) + T-24a creation (pipeline_volumes.py migration). Spec acceptance criteria in vault_io_spec.md section 9 govern T-05 approval.",
+  "risks": [
+    {
+      "id": "R-impl-01",
+      "severity": "LOW",
+      "description": "Spec assumes pyarrow write_table preserves ym as in-file column when passed via a pandas DataFrame with ym column; regression test in T-25 verifies."
+    },
+    {
+      "id": "R-impl-02",
+      "severity": "LOW",
+      "description": "os.replace is atomic on same filesystem; cross-filesystem writes degrade to non-atomic. All current callers write under <project>/data/** which is one filesystem; documented in spec section 2.3."
+    },
+    {
+      "id": "R-impl-03",
+      "severity": "MEDIUM",
+      "description": "Spark writer emits part-00000-*.parquet, not part.parquet; reader documented to glob *.parquet per ym dir. If a future Spark build emits a single part-00000-...parquet AND vault_io.write_partition later writes part.parquet in the same dir, concat will double-read. Mitigation: the writer for sat_state_observation Spark path explicitly deletes the ym dir before writing (idempotent overwrite); add to T-10 review."
+    },
+    {
+      "id": "R-impl-04",
+      "severity": "LOW",
+      "description": "Column pushdown for sat_state_observation drops ym from the read if STATE_COLS does not include 'ym'; add 'ym' to STATE_COLS when per-partition grouping is needed downstream (not required by current mart writer because mart filters by ym in the ym_filter itself)."
+    }
+  ],
+  "evidence": {
+    "grep_used_for_call_site_counts": "rg -nE \"read_parquet|rglob\\(.\\*\\\\.parquet.\\)|ParquetFile\\(\" over the eight target files.",
+    "architecture_citations": [
+      "architecture.md section 2.4 (partition layout)",
+      "architecture.md section 2.5 (ym helpers, truth table)",
+      "architecture.md section 2.6 (fact_trajectory_enriched denormalization)",
+      "architecture.md section 6.2 (pyarrow writer-reader contract - finding #4)"
+    ],
+    "requirements_citations": [
+      "FR-02, FR-03, FR-06, FR-13, FR-14, FR-16, FR-17",
+      "NFR-05, NFR-06, NFR-07, NFR-09, NFR-11"
+    ],
+    "claude_md_citations": [
+      "section 2.6 icao24 is string",
+      "section 2.7 Windows cp1252",
+      "section 3.4 pandas nullable dtypes",
+      "section 7 read individual files and concat"
+    ]
+  },
+  "unblocks": [
+    "T-05",
+    "T-08",
+    "T-09",
+    "T-10",
+    "T-14",
+    "T-17",
+    "T-22"
+  ],
+  "approved_by": "data-engineer"
+}

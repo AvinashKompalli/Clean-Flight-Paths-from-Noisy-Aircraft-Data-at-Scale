@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    name: pytest (pandas invariants)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: etl4/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r etl4/requirements.txt
+
+      - name: Run pytest
+        run: pytest etl4/tests/test_pipeline.py -v --tb=short
+
+  dashboards:
+    name: dashboard JSON lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate dashboard JSON
+        run: |
+          set -e
+          for f in etl4/dashboard/*.json; do
+            echo "::group::$f"
+            python -m json.tool "$f" > /dev/null
+            echo "ok"
+            echo "::endgroup::"
+          done

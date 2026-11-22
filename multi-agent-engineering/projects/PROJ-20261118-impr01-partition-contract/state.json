@@ -1,0 +1,137 @@
+{
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "title": "IMPR-01: Implement the ym=YYYY-MM partition contract with watermark-driven incremental refresh",
+  "description": "Execute the ADR 2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh. Design is committed; this project is the implementation wave. Removes the 20-30 min full vault rebuild on any new month input and replaces TRUNCATE+COPY sink with INSERT ON CONFLICT. Prerequisite: PROJ-20261114-wi1-metrics reaches phase=DONE.",
+  "created_at_utc": "2026-11-18T05:08:00Z",
+  "updated_at_utc": "2026-11-18T09:06:00Z",
+  "phase": "ARCHITECTURE",
+  "tasks": [
+    {
+      "task_id": "T-001",
+      "name": "Requirements + BRD + AC + RTM",
+      "owner": "product-owner",
+      "status": "APPROVED",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md"
+    },
+    {
+      "task_id": "T-ARCH",
+      "name": "Architecture (DDL, SQL, task breakdown, 5-PR plan, migration outline, risks)",
+      "owner": "data-engineer",
+      "status": "APPROVED",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md"
+    }
+  ],
+  "artifacts": {
+    "requirements": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+    "architecture": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md"
+  },
+  "approval_history": [
+    {
+      "gate": "REQUIREMENTS",
+      "approver": "product-owner",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T06:12:00Z",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/requirements.md",
+      "notes": "18 FRs, 17 NFRs, 18 ACs, 100% RTM coverage. 6 open questions for data-engineer. State.json upstream_design wording 'view or materialized view' corrected to 'plain SQL view' per ADR 2026-11-13 + 2026-11-18."
+    },
+    {
+      "gate": "ARCHITECTURE",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T09:06:00Z",
+      "artifact": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/architecture.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261118T0906-data-engineer-to-orchestrator.json",
+      "notes": "Architecture is BINDING. All 18 FRs honoured. Six PO Open Questions answered in architecture.md section 12. Follow-up ADRs listed in architecture.md section 9.3: cross-month flight merge rule, denormalization staleness on fact_trajectory_enriched, SYN-* ym sentinel, fact_experiment_result table-vs-view, WI-1 NFR-05 supersession by DO NOTHING + rewind. Gate mismatch surfaced: WI-1 closed at CONDITIONAL_ACCEPTANCE, not DONE; orchestrator confirmation requested but does not block this phase."
+    },
+    {
+      "gate": "SQL_REVIEW_T17_T18",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-18T17:30:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t19_sql_review.md",
+      "notes": "T-19 SQL review of PR4 (T-17 postgres_sink.py staged UPSERT + T-18 sink/postgres.py write_run CTE). Sections A-E all PASS: TEMP lifetime + ON COMMIT DROP, DISTINCT ON tiebreakers byte-match architecture section 4.2/4.3, same-txn watermark through watermark.set(..., conn), CTE returns exactly one (run_id, created) row on both insert + conflict paths, transactional boundaries correct for both modules. No SQL defects. UNIQUE (ym, source, method, noise) from T-01B rules out multi-row conflict ambiguity. Unblocks T-20, T-22, T-27."
+    },
+    {
+      "gate": "VAULT_REVIEW_T08",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-19T00:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t11_vault_review.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261119T0000-data-engineer-to-orchestrator.json",
+      "notes": "T-11 review of T-08 _chunked_flightlist_vault rewrite (commit a008205). Sections A-E all PASS: determinism (modulo pre-existing load_dt non-determinism, out of T-08 scope), contract conformance (per-ym writes under ym=YYYY-MM/part.parquet via vault_io.write_partition, ym in file body, small-hub compaction preserves hub_aircraft keep=first precedence, ym_from_filename reused as single truth source), same-txn watermark (all 4 partitioned-table watermarks in one psycopg txn + conn.commit; read-gate on hub_flight only is safe because write is atomic), inline _compact_small_hub stub shape pinned for T-09 (10-item contract in review section E). All 4 flagged deviations re-triaged: #1 LOW/RESOLVED (smoke substitution stronger than literal), #2 NONE/CORRECT (design-aligned expansion), #3 LOW/DEFER to T-10 (R13 states_hub_input), #4 NONE/T-10 SCOPE (sat_state_observation). Unblocks T-09, T-10, T-14."
+    },
+    {
+      "gate": "MARTS_REVIEW_T14_T15",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-20T00:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t16_marts_review.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0000-data-engineer-to-orchestrator.json",
+      "notes": "T-16 review of T-14 (commit 8161cd4 marts.py per-ym rewrite) + T-15 (commit 40f1fb4 _latest_sfs cross-month reader rule). Sections A-F: A contract conformance PASS (per-ym build matches architecture 2.4/2.6; dim_* full-refresh; fact_* via vault_io.write_partition; ym column re-derived via ym_from_epoch matches partition name); B watermark txn safety PASS (both fact watermarks in one psycopg txn + conn.commit per ym; rollback on exception drops both; crash-safety audit clean for all 4 crash points); C _latest_sfs PASS as-written with MEDIUM gap flagged - per-ym read scope means Jan/Feb cross-month rows never share a frame; mitigation via postgres_sink UPSERT + rewind contract; follow-up ADR drafted in review section F; D _STATE_COLS correctly omits icao24 (verified against raw_vault.py and raw_vault_spark.py on-disk schemas; checklist section 1 row 9 was stale), icao24 dtype preserved via vault_io.read_table cast; E idempotency PASS (RUN 2 fact counts 0, st_mtime_ns unchanged, watermarks stable); F ADR entry wording recommended for orchestrator. Zero HIGH severity findings. Zero blockers for T-24 PR5 review or PR3 merge. Unblocks T-24."
+    },
+    {
+      "gate": "PR5_REVIEW",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-20T06:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t24_pr5_review.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0600-data-engineer-to-orchestrator.json",
+      "notes": "T-24 review of PR5 bundle (T-20 run_matrix --ym + SYN-002A, T-21 rewind.py 565 lines, T-22 run_e2e drift check + ym propagation, T-23 idempotent stage_eval_mart + v_eval_mart_ym). Sections A-F all PASS. A: --ym threading coherent across run_matrix and run_e2e; SYN-002A sentinel consistent at 4 code paths; _YM_CALENDAR_RE enforced. B: rewind downstream-first chain, fs-before-txn ordering, idempotent re-run. C: drift check covers all 3 orphan/missing/stale cases; --skip-drift-check escape hatch; ordered after infra+schema. D: fact_experiment_result 18->19 col additive change; dashboards 06/07/08 all use explicit column lists (non-breaking); v_eval_mart_ym definitions byte-match between run_e2e.py and create_tables.sql. E: T-23 single psycopg txn; T-21 fs-before-txn with T-22 drift-check recovery; T-20 per-cell DO NOTHING + eventual watermark advance is idempotent; no residual commit/watermark disagreement within same ym. F: 92/0/0 pytest at branch HEAD 2145dbf. Findings: F1 LOW (cross-month neighbour rule not in T-21 CLI help text; ADR 2026-11-20 pre-flags as deferred), F2 LOW (drift check omits sat_state_observation from VAULT_PARTITIONED_TABLES per dispatch spec), F3 INFO (fact_experiment_result 18->19 col ADR amendment pending in decisions.md - orchestrator homework per architecture.md 9.3). Zero HIGH, zero MEDIUM, zero blockers for branch-to-main merge. Unblocks T-27 functional rewind E2E."
+    },
+    {
+      "gate": "MIGRATION_SCRIPT_REVIEW_T12",
+      "approver": "data-engineer",
+      "status": "APPROVED",
+      "timestamp_utc": "2026-11-20T07:00:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t13_migration_review.md",
+      "notes": "T-13 review of T-12 (commit 2145dbf etl4/scripts/migrate_partition_ym.py, 691 lines). Binding decisions on 3 schema gaps: (Gap 1) link_flight_aircraft/link_flight_route -> Option C bronze rebuild via T-08 (builders raw_vault.py L158-199 do not emit 'day'; T-08 FILE-MONTH key via ym_from_filename is the committed authority; link rebuild via _partition_done cycle); (Gap 2) sat_flight_summary -> FILE-MONTH key (Option B) implemented via bronze rebuild (Option C). Dispatch's 'Option A matches T-08' claim empirically wrong per raw_vault.py L543 (frame[ym] = pd.Series([filename-derived ym] * len(frame)) for all 4 flightlist-derived tables; T-11 APPROVED this writer 2026-11-19). Dispatch's 'Option B breaks T-15 ADR' contradicted by 2026-11-20 T-15 ADR tail entry (sink UPSERT + rewind M+/-1 pair closes R1, partition key choice orthogonal). (Gap 3) in-file 'ym' column + _DONE sentinel CONFIRMED correct and binding; architecture.md section 6 patched inline in review document sections 4 (patch text) and 5 (follow-up ADR). Zero code changes required on migrate_partition_ym.py. Operator runbook amended in review section 2: step 4 HARD GATE on row-count verification before step 5 monolith delete; step 6 bronze rebuild for 3 flagged tables after watermark clear; step 8 pre-rewind lock release only after step 7 verifies row counts. Exit-code policy ACCEPTED (schema_mismatch WARN in dry-run exit 0, FAIL in real-run exit 1 + skip-watermark; row_count_mismatch always FAIL). Follow-up ADR text drafted in t13_migration_review.md section 5 for orchestrator to append to etl4/docs/decisions.md. R1b (hub_flight day vs file-month agreement, today 100%) flagged LOW with defensive-check follow-up. T-12 status flips to APPROVED. Unblocks operator migration pass."
+    },
+    {
+      "gate": "REWIND_E2E_T27",
+      "approver": "functional-tester",
+      "status": "CONDITIONAL",
+      "timestamp_utc": "2026-11-20T01:46:00Z",
+      "evidence_path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/t27_rewind_e2e_report.md",
+      "handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0146-functional-tester-to-orchestrator.json",
+      "notes": "T-27 end-to-end validation of T-21 rewind.py (565 lines). 7/7 scenarios PASS (Sc1 dry-run empty, Sc2 single-layer vault, Sc3 full-stack downstream-first via call-order spy, Sc4 cross-month rewind M alone then M+1 FS half, Sc5 --help carries cross-month epilog, Sc6 idempotent repeat no-op, Sc7 dim_aircraft never rolled back). Three defects. D-27-1 HIGH: live rewind of a ym range that actually contains cross-month flights emits no warning; ADR 2026-11-20 (b) requires BOTH help-text AND a SQL detection snippet, only help-text (epilog) is present; 1-line patch: pre-rewind SELECT probe + WARNING line. D-27-2 MEDIUM: --layer all --dry-run without --yes exits 1 because rewind_all raises SystemExit before checking dry_run; 1-line swap in rewind_all. D-27-3 MEDIUM observation: public.fact_trajectory_enriched lacks ym column; rewind_sink only works in dry-run against prod - already tracked by T-12/T-13. Isolation: t27_sandbox Postgres schema + scratch FS root; POSTGRES_DSN set BEFORE etl4.orchestration.rewind import (DSN_DEFAULT binds to sandbox search_path); rewind_vault/rewind_marts __kwdefaults__['root'] patched to scratch; sandbox DROPped in finally; pre-run public.dim_aircraft=149747 post-run=149747; pipeline_watermarks prod rows unchanged. Pytest 92 passed before + after. Call-order deviation from dispatch spec is informational (code order eval_mart first is correct under downstream-first because eval_mart.fact_experiment_result materializes MAX(ym) over pipeline_runs; three listings exist across dispatch/code/architecture, all agree on the matrix<sink<marts<vault invariant). Status CONDITIONAL pending orchestrator triage of D-27-1 (owner developer-backend)."
+    }
+  ],
+  "open_defects": [],
+  "change_requests": [],
+  "last_handoff": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/handoffs/20261120T0000-data-engineer-to-orchestrator.json",
+  "source_request": "User directive 2026-11-18: 'make the 3 suggestions I gave are also looked into and implemented if needed'. Orchestrator evaluation: IMPR-01 marked IMPLEMENT (strong PDF section 3 trace, design already committed as ADR, pure execution ahead). Full rationale in multi-agent-engineering/improvements_backlog.md IMPR-01 entry. Gate: PROJ-20261114-wi1-metrics must reach phase=DONE before this project advances past PENDING.",
+  "standing_rules": [
+    "CLAUDE.md at repo root is non-negotiable",
+    "plan.md and ETL4 (3) (1).pdf are the authoritative project brief",
+    "No Claude co-author trailer on commits (CLAUDE.md 2.1)",
+    "No secrets, no large data (CLAUDE.md 2.2, 2.3)",
+    "icao24 is pandas string dtype (CLAUDE.md 2.6)",
+    "Windows cp1252-safe output (CLAUDE.md 2.7)",
+    "Use tokens minimally (user standing rule)",
+    "Distributed agent dispatch - never idle on a single agent (user standing rule)"
+  ],
+  "upstream_design": {
+    "adr_id": "2026-11-13 - Partition contract (ym=YYYY-MM) and watermark-driven incremental refresh",
+    "adr_path": "etl4/docs/decisions.md",
+    "scope_summary": [
+      "pipeline_watermarks(layer, table_name, last_ym, row_count, updated_at) table",
+      "Partition every parquet tree on ym=YYYY-MM (keep hub_aircraft, hub_airport, sat_aircraft_identity non-partitioned with a tiny compaction pass)",
+      "Vault: filter bronze by ym > last_ym; write per-month shards",
+      "Marts: per-month build, append to partitioned tree",
+      "Sink: INSERT ... ON CONFLICT per target per month (replaces TRUNCATE + COPY)",
+      "Matrix: add ym column + unique (ym, source, method, noise), ON CONFLICT DO NOTHING",
+      "eval_mart: plain SQL view (not materialized)",
+      "Rewind CLI: python -m etl4.orchestration.rewind --layer vault --from 2022-03 --to 2022-05",
+      "Zero-reprocess migration: one-shot pyarrow pass per existing monolithic part.parquet split by extracted ym"
+    ],
+    "effort_estimate_days": "3-4",
+    "sub_pr_count_target": 5,
+    "risks_from_adr": [
+      "Cross-month flights (same hk_flight in two ym partitions) - reader-side merge rule in vault/marts.py::_latest_sfs()",
+      "Small-hub uniqueness drift - compaction pass enforces",
+      "ym extraction asymmetry: flightlist bronze has in-file day; state bronze has it in the partition path",
+      "Watermark vs filesystem drift - set(ym dirs) vs contiguous [min, last_ym] range check in run_e2e"
+    ]
+  },
+  "dispatch_chain_note": "Orchestrator next step: dispatch developer-backend on PR1 (DDL + skeleton) and PR4 (sink UPSERT staging pattern) in parallel. Data-engineer standing by for T-04 spec, T-07 reader-conversion checklist, and all code reviews. See architecture.md section 5 for the 27-task breakdown and section 8 for the workstream map."
+}

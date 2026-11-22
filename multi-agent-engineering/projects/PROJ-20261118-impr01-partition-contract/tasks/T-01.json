@@ -1,0 +1,80 @@
+{
+  "task_id": "T-01",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR1",
+  "title": "Append pipeline_watermarks DDL to create_tables.sql",
+  "owner": "developer-backend",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "blocker",
+  "objective": "Append the pipeline_watermarks DDL (CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS, CHECK regex on last_ym) to etl4/infra/create_tables.sql per architecture.md section 3.",
+  "depends_on": [],
+  "unblocks": [
+    "T-02 (watermark client etl4/vault/watermark.py)",
+    "T-17 (sink staged INSERT ON CONFLICT with watermark write in same txn)",
+    "T-21 (rewind primitive full implementation - DELETE FROM pipeline_watermarks)",
+    "T-22 (run_e2e pre-flight filesystem vs watermark drift check)"
+  ],
+  "files_changed": [
+    {
+      "path": "etl4/infra/create_tables.sql",
+      "change": "append-only",
+      "lines_added": 21,
+      "lines_removed": 0
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC-1",
+      "statement": "DDL appended cleanly; file ends with a trailing newline.",
+      "status": "PASS",
+      "evidence": "git diff shows +21 lines appended after v_pareto_frontier view; od -c on last bytes shows ');\\n' so trailing newline preserved."
+    },
+    {
+      "id": "AC-2",
+      "statement": "Both psql applies exit 0 (idempotence check).",
+      "status": "PASS",
+      "evidence": "Apply 1 exit code = 0 (first-time creation emits 'CREATE TABLE' and 'CREATE INDEX' for pipeline_watermarks and idx_watermarks_layer). Apply 2 exit code = 0 (emits NOTICE 'relation \"pipeline_watermarks\" already exists, skipping' and 'relation \"idx_watermarks_layer\" already exists, skipping')."
+    },
+    {
+      "id": "AC-3",
+      "statement": "\\d pipeline_watermarks shows the architecture-spec columns + PK + CHECK + index.",
+      "status": "PASS",
+      "evidence": "Columns: layer text NOT NULL, table_name text NOT NULL, last_ym text NOT NULL, row_count bigint, updated_at timestamptz NOT NULL DEFAULT now(). PK: pipeline_watermarks_pkey btree (layer, table_name). Secondary index: idx_watermarks_layer btree (layer). CHECK: pipeline_watermarks_last_ym_check CHECK (last_ym ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text)."
+    },
+    {
+      "id": "AC-4",
+      "statement": "Valid-ym INSERT succeeds; malformed INSERT fails with CHECK violation.",
+      "status": "PASS",
+      "evidence": "('vault','hub_flight','2022-07',100) -> INSERT 0 1. ('vault','xxx','2022-7',0) -> ERROR: new row for relation \"pipeline_watermarks\" violates check constraint \"pipeline_watermarks_last_ym_check\"."
+    },
+    {
+      "id": "AC-5",
+      "statement": "Row deleted at the end of the smoke (no residual test data).",
+      "status": "PASS",
+      "evidence": "DELETE 1 followed by SELECT count(*) FROM pipeline_watermarks -> 0."
+    }
+  ],
+  "commands_run": [
+    {"cmd": "Get-Content etl4/infra/create_tables.sql -Raw | docker exec -i etl4-postgres psql -U etl4 -d etl4 -v ON_ERROR_STOP=1", "exit": 0, "note": "first apply"},
+    {"cmd": "Get-Content etl4/infra/create_tables.sql -Raw | docker exec -i etl4-postgres psql -U etl4 -d etl4 -v ON_ERROR_STOP=1", "exit": 0, "note": "second apply (idempotent; NOTICE already-exists for pipeline_watermarks + idx_watermarks_layer)"},
+    {"cmd": "docker exec etl4-postgres psql -U etl4 -d etl4 -c \"\\d pipeline_watermarks\"", "exit": 0, "note": "confirms shape"},
+    {"cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 -c \"INSERT INTO pipeline_watermarks ... VALUES ('vault','hub_flight','2022-07',100);\"", "exit": 0, "note": "valid INSERT succeeded"},
+    {"cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 -c \"INSERT INTO pipeline_watermarks ... VALUES ('vault','xxx','2022-7',0);\"", "exit": 1, "note": "expected failure; CHECK constraint violated as designed"},
+    {"cmd": "docker exec -i etl4-postgres psql -U etl4 -d etl4 -c \"DELETE FROM pipeline_watermarks WHERE layer='vault' AND table_name='hub_flight';\"", "exit": 0, "note": "DELETE 1, residual count = 0"}
+  ],
+  "integration_points": {
+    "reads": "none at this layer",
+    "writes": "public.pipeline_watermarks (new table in Postgres schema etl4)",
+    "consumers": [
+      "etl4/vault/watermark.py (T-02, not yet implemented)",
+      "etl4/vault/postgres_sink.py staged UPSERT path (T-17)",
+      "etl4/orchestration/rewind.py (T-21 full)",
+      "etl4/run_e2e.py pre-flight drift check (T-22 full)"
+    ]
+  },
+  "contract_deviations": [],
+  "notes": "Architecture.md section 3 index specification is on (layer) alone, not (layer, table_name). The (layer, table_name) covering index is already provided automatically by the PRIMARY KEY btree. The idx_watermarks_layer btree(layer) is the only additional index, per section 3. Matches exactly.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-18T09:19:00Z"
+}

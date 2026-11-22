@@ -1,0 +1,47 @@
+{
+  "task_id": "T-17",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "pr": "PR4",
+  "title": "Rewrite etl4/vault/postgres_sink.py to staged INSERT ON CONFLICT per-ym",
+  "owner": "developer-backend",
+  "status": "DONE",
+  "phase": "IMPLEMENTATION",
+  "priority": "high",
+  "objective": "Rewrite etl4/vault/postgres_sink.py so each target (dim_aircraft, fact_trajectory_enriched) loads via the architecture.md section 4 staged pattern: BEGIN -> CREATE TEMP TABLE stg_<target> LIKE <target> ON COMMIT DROP -> COPY -> INSERT ... SELECT DISTINCT ON (<pk>) ... ORDER BY <pk>, <tiebreaker> ON CONFLICT (<pk>) DO UPDATE SET <non_pk_assignments> -> watermark.set(sink, <target>, ym, row_count, conn) in the SAME txn -> COMMIT.",
+  "depends_on": ["T-01", "T-02"],
+  "unblocks": [
+    "T-19 (SQL review)",
+    "T-22 (run_e2e invokes per-ym sink)",
+    "run_e2e.py / orchestration DAG callers will pass --ym under T-22"
+  ],
+  "files_changed": [
+    {"path": "etl4/vault/postgres_sink.py", "change": "rewrite", "lines_added": 253, "lines_removed": 33},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/artifacts/pr4_sink_smoke.py", "change": "new", "lines_added": 271, "lines_removed": 0}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "statement": "python -c 'import ast; ast.parse(...); print(syntax OK)' prints syntax OK", "status": "PASS", "evidence": "stdout: 'syntax OK'"},
+    {"id": "AC-2", "statement": "python -c 'from etl4.vault.postgres_sink import load_table; print(IMPORT OK)' prints IMPORT OK", "status": "PASS", "evidence": "stdout: 'IMPORT OK'"},
+    {"id": "AC-3", "statement": "pytest etl4/tests/ -q => 49/0/0 (no regressions)", "status": "PASS", "evidence": "'49 passed in 7.26s'"},
+    {"id": "AC-4", "statement": "Smoke: stage 10 rows via new sink, re-stage with modified field, confirm ON CONFLICT DO UPDATE", "status": "PASS", "evidence": "pr4_sink_smoke.py _t17(): First load 10 rows; second load row 05 typecode A320 -> B738 (DO UPDATE observed); third load with NULL typecode preserves B738 (COALESCE path); watermark advanced to 2099-07 same txn. stdout: '  T-17 OK  staged COPY + DO UPDATE + COALESCE + same-txn watermark'"}
+  ],
+  "commands_run": [
+    {"cmd": "python -c \"import ast; ast.parse(open('etl4/vault/postgres_sink.py').read()); print('syntax OK')\"", "exit": 0, "stdout": "syntax OK"},
+    {"cmd": "python -c \"from etl4.vault.postgres_sink import load_table; print('IMPORT OK')\"", "exit": 0, "stdout": "IMPORT OK"},
+    {"cmd": "pytest etl4/tests/ -q", "exit": 0, "note": "49 passed in 7.26s"},
+    {"cmd": "python -c \"import pr4_sink_smoke as s; s._t17()\"", "exit": 0, "stdout": "T-17 OK  staged COPY + DO UPDATE + COALESCE + same-txn watermark"}
+  ],
+  "integration_points": {
+    "reads": "data/gold/marts/dim_aircraft/part.parquet; data/gold/marts/fact_trajectory_enriched/ym=YYYY-MM/part.parquet (falls back to monolith + in-memory time filter if partitioned child missing)",
+    "writes": "Postgres dim_aircraft (DO UPDATE overwrite icao24, COALESCE registration/typecode); fact_trajectory_enriched (DO UPDATE position+kinematics, COALESCE callsign/typecode/registration, ym=EXCLUDED.ym); pipeline_watermarks('sink', <target>, ym, row_count) same txn",
+    "consumers": [
+      "etl4/run_e2e.py (sink stage; must pass --ym under T-22 rewire)",
+      "etl4/orchestration/dags/*.py (BashOperator; must pass --ym under T-22 rewire)"
+    ]
+  },
+  "contract_deviations": [
+    "None against architecture.md section 4. Fixed in-flight: _display helper for pretty log path - earlier version used Path.relative_to(ROOT) which raised when callers (e.g. smoke tests) pass a marts_dir outside the repo root."
+  ],
+  "notes": "CLI contract: --ym required (YYYY-MM format enforced by _YM_RE). --only, --dsn, --marts-dir preserved. Per-ym loop is caller's responsibility (architecture 4.1). The staged pattern uses CREATE TEMP TABLE ... ON COMMIT DROP so an uncommitted retry does not leak staging state. Watermark write lives inside the same cursor context as the INSERT, so a cursor error rolls back both halves atomically.",
+  "windows_cp1252_safe": true,
+  "timestamp_utc": "2026-11-18T17:00:00Z"
+}

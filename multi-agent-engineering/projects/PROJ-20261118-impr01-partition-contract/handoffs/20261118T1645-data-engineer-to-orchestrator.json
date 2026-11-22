@@ -1,0 +1,48 @@
+{
+  "handoff_id": "20261118T1645-data-engineer-to-orchestrator",
+  "project_id": "PROJ-20261118-impr01-partition-contract",
+  "from_agent": "data-engineer",
+  "to_agent": "orchestrator",
+  "task_id": "T-01B",
+  "phase": "IMPLEMENTATION",
+  "timestamp_utc": "2026-11-18T16:45:00Z",
+  "status": "APPROVED",
+  "summary": "Orphan DDL from architecture.md section 2.3 (pipeline_runs.ym ADD COLUMN + backfill + duplicate collapse + NOT NULL + UNIQUE + index) is now landed in etl4/infra/create_tables.sql. Two back-to-back applies both exit 0 (idempotent). All 7 acceptance criteria pass. pytest etl4/tests/ -q is 49 passed, 0 failed, 0 skipped. The T-05 handoff regression surfacing 'column ym of relation pipeline_runs does not exist' is resolved. PR4 T-18 (write_run CTE using ON CONFLICT (ym, source, method, noise) DO NOTHING RETURNING run_id) is now unblocked, as is T-20 (run_matrix per-ym writes).",
+  "deliverables": [
+    {"path": "etl4/infra/create_tables.sql", "status": "MODIFIED (+56 append-only after idx_watermarks_layer)"},
+    {"path": "multi-agent-engineering/projects/PROJ-20261118-impr01-partition-contract/tasks/T-01B.json", "status": "CREATED"}
+  ],
+  "evidence": {
+    "diff_summary": "etl4/infra/create_tables.sql: +56 lines appended after idx_watermarks_layer. Adds ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS ym TEXT; UPDATE ... SET ym = CASE WHEN source='synthetic' THEN 'SYN-002A' WHEN started_at IS NOT NULL THEN to_char(started_at,'YYYY-MM') WHEN run_date IS NOT NULL THEN to_char(run_date,'YYYY-MM') ELSE 'UNKNOWN' END WHERE ym IS NULL; WITH ranked AS (ROW_NUMBER() OVER PARTITION BY ym,source,method,noise ORDER BY run_id DESC) DELETE duplicates; ALTER TABLE ... ALTER COLUMN ym SET NOT NULL; DO $$ IF NOT EXISTS (pg_constraint lookup) THEN ADD CONSTRAINT pipeline_runs_ym_src_mth_noise_key UNIQUE (ym,source,method,noise) END; CREATE INDEX IF NOT EXISTS idx_pipeline_runs_ym ON pipeline_runs(ym). No other hunks; existing pipeline_runs CREATE TABLE statement is untouched (migration is ALTER-only).",
+    "acceptance": {
+      "AC-1_append_clean": "PASS - +56 lines appended after pipeline_watermarks block; no hunks elsewhere",
+      "AC-2_two_applies_exit_0": "PASS - Apply 1 exit 0 (UPDATE 102, DELETE 77); Apply 2 exit 0 (UPDATE 0, DELETE 0, all guards fire)",
+      "AC-3_describe_pipeline_runs": "PASS - ym text NOT NULL; indexes include idx_pipeline_runs_ym btree (ym) and pipeline_runs_ym_src_mth_noise_key UNIQUE CONSTRAINT btree (ym, source, method, noise)",
+      "AC-4_ym_distribution": "PASS - 2026-11 -> 13 rows; SYN-002A -> 12 rows; 0 NULLs (ym SET NOT NULL enforces)",
+      "AC-5_no_duplicates": "PASS - HAVING count(*) > 1 returns 0 rows",
+      "AC-6_duplicate_insert_errors": "PASS - INSERT of (SYN-002A, synthetic, time_gap, N0, CURRENT_DATE, 1.0) fails with duplicate key value violates unique constraint, exit 1",
+      "AC-7_pytest_green": "PASS - 49 passed in 7.15s (opensky conda env)"
+    },
+    "duplicate_collapse_count": 77,
+    "pre_dedup_total_rows": 102,
+    "post_dedup_total_rows": 25,
+    "ym_distribution_after_backfill": {"2026-11": 13, "SYN-002A": 12}
+  },
+  "unblocks": [
+    "PR4 T-18 (write_run CTE: WITH new_run AS (INSERT ... ON CONFLICT (ym, source, method, noise) DO NOTHING RETURNING run_id) SELECT run_id FROM new_run; no more UndefinedColumn errors)",
+    "T-20 (run_matrix.py --ym arg + per-ym watermark advance)",
+    "test_matrix_csv_written_after_every_cell (regression closed)"
+  ],
+  "blocked_on": [],
+  "next_action": "Orchestrator: mark T-01B DONE in state.json. Resume PR4 (T-17, T-18, T-19) with confidence that the schema prerequisite is in place. If the parallel PR4 agent has already pushed smoke code against write_run that was failing at import/connect time against the pre-migration schema, it can re-run now against the live DB.",
+  "risks": [
+    {"severity": "LOW", "note": "Backfill picked started_at (not run_date) as the month source for real-source rows because run_date was NULL for 9 of the 15 s3 rows at migration time. All resulting ym values land in 2026-11 which matches the actual run month; no cross-month flights were in the backfilled range."},
+    {"severity": "LOW", "note": "The 77 collapsed rows were all from pre-migration matrix sweeps that reran cells without a constraint. Their eval_results rows were ON DELETE CASCADE'd away automatically. Row count in eval_results dropped correspondingly - any dashboard query that aggregated by run_id will see a one-time drop; queries that aggregate by (source, method, noise, metric) see the same shape (max per group is preserved via 'keep highest run_id')."},
+    {"severity": "INFO", "note": "Architecture section 2.3 asks for UNKNOWN-ym rows to not exist. The backfill CASE includes an UNKNOWN fallback for defensiveness, but 0 rows hit it (no pipeline_runs row has both started_at IS NULL AND run_date IS NULL). If future legacy data is loaded, those rows would get 'UNKNOWN' as ym and need manual repair before the UNIQUE constraint can tolerate them."}
+  ],
+  "contract_deviations_vs_architecture": [
+    "Architecture section 2.3 shows duplicate-collapse via 'DELETE p1 USING p2 WHERE p1.run_id < p2.run_id AND tuple match'. T-01B uses WITH ranked ROW_NUMBER() window pattern instead. Same set-theoretic result (keep max run_id per group); window pattern is O(n log n) and preferred.",
+    "Architecture section 2.3 shows backfill as 'to_char(run_date, YYYY-MM)'. T-01B uses CASE on source to emit SYN-002A sentinel for synthetic (architecture 2.3 footnote names this sentinel), started_at as primary month source for real rows (run_date was NULL for a majority of them at migration time), and UNKNOWN final fallback. Zero rows hit UNKNOWN."
+  ],
+  "windows_cp1252_safe": true
+}
