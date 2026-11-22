@@ -794,7 +794,7 @@ blockColumn(s, [
   { head: "The gate beats the rule",
     body: "Method C holds the flight count at truth in every profile. The jump rule gave 285 flights at N3." },
   { head: "One cell needs an explanation",
-    body: "The N2 smoothed cell drifts. Its gate threshold comes from N1 residuals, and rejects valid N2 measurements. One value causes the fault." },
+    body: "The N2 smoothed cell drifts. The code fixes the gate and the measurement-noise value, and it discards a rejected measurement. The trigger at N2 is not yet isolated." },
 ], X + MTW + 0.45, TOP, W - MTW - 0.45, fn19 - 0.16, 0.24);
 
 /* 20 -------------------------------------------- six performance targets */
