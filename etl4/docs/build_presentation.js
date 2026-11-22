@@ -409,32 +409,53 @@ cardAt(s, c4, colR, fnTop4 - 0.2 - cardHeight(c4, colW), colW);
 pres.addSection({ title: "Approach" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Pipeline architecture", { placeholder: "title" });
-y = lead(s, "The pipeline has seven stages in a linear flow. Each tier writes its output to disk. A downstream tier therefore rebuilds without a repeat of the work above it.");
+y = lead(s, "The pipeline has seven stages. Two ingest paths meet at the bronze tier. Each tier writes its output to disk, so a downstream tier rebuilds without a repeat of the work above it.");
 
 const tiers = [
-  { t: "OpenSky Network", d: "monthly archives\nlive REST feed\ndaily state archives", c: "F0F2F5", tc: BODY },
-  { t: "Apache Kafka", d: "raw topic, 3 partitions\ndead-letter topic\nkey = airframe id", c: "F0F2F5", tc: BODY },
+  { t: "OpenSky Network", d: "monthly flight archives\ndaily state archives\nlive REST feed", c: "F0F2F5", tc: BODY },
+  { c: "F0F2F5", tc: BODY, split: [
+      { t: "Batch ingest", d: "archives to bronze\nno broker in path" },
+      { t: "Apache Kafka", d: "live REST feed only\nraw + dead-letter\nkey = airframe id" },
+    ] },
   { t: "Bronze", d: "source schema kept\nno projection\n121.6 M rows, 6.2 GB", c: PALE, tc: NAVY },
   { t: "Silver", d: "Data Vault 2.0\nhubs, links, satellites\n225.5 M rows, 15 GB", c: PALE, tc: NAVY },
   { t: "Gold", d: "dimensional marts\nfacts and dimensions\n19.0 M rows, 2.0 GB", c: PALE, tc: NAVY },
   { t: "Experiments", d: "3 methods x 4 profiles\n12 cells, two inputs\nPostgres + Grafana", c: "FBEDE6", tc: ORANGE },
 ];
 const cw6 = 1.80, gap6 = 0.226, tierH = 2.22;
+// The second column splits: archives reach bronze with no broker, so a single
+// chain of boxes would state an ingest path the code does not have.
+const subH = tierH / 2 - 0.06;
+const subMid = [subH / 2, tierH / 2 + 0.06 + subH / 2];
 tiers.forEach((tr, i) => {
   const x = X + i * (cw6 + gap6);
-  s.addShape(pres.ShapeType.roundRect, { x: x, y: y, w: cw6, h: tierH, rectRadius: 0.07,
-    fill: { color: tr.c }, line: { color: tr.c, width: 0 }, objectName: "tier" + i });
-  s.addText(tr.t, { x: x + 0.10, y: y + 0.16, w: cw6 - 0.20, h: 0.52, fontSize: 13.5, bold: true,
-    color: tr.tc, isTextBox: true, margin: 0, align: "center", lineSpacingMultiple: 1.1,
-    objectName: "tiert" + i });
-  s.addText(tr.d, { x: x + 0.08, y: y + 0.72, w: cw6 - 0.16, h: 1.35, fontSize: 11, color: MUTED,
-    isTextBox: true, margin: 0, align: "center", lineSpacingMultiple: 1.22, objectName: "tierd" + i });
+  const boxes = tr.split
+    ? [{ t: tr.split[0].t, d: tr.split[0].d, by: y, bh: subH },
+       { t: tr.split[1].t, d: tr.split[1].d, by: y + tierH / 2 + 0.06, bh: subH }]
+    : [{ t: tr.t, d: tr.d, by: y, bh: tierH }];
+  boxes.forEach((b, k) => {
+    const sp = Boolean(tr.split);
+    s.addShape(pres.ShapeType.roundRect, { x: x, y: b.by, w: cw6, h: b.bh, rectRadius: 0.07,
+      fill: { color: tr.c }, line: { color: tr.c, width: 0 }, objectName: `tier${i}_${k}` });
+    s.addText(b.t, { x: x + 0.10, y: b.by + (sp ? 0.09 : 0.16), w: cw6 - 0.20, h: sp ? 0.28 : 0.52,
+      fontSize: sp ? 11.5 : 13.5, bold: true, color: tr.tc, isTextBox: true, margin: 0,
+      align: "center", lineSpacingMultiple: 1.1, objectName: `tiert${i}_${k}` });
+    s.addText(b.d, { x: x + 0.08, y: b.by + (sp ? 0.40 : 0.72), w: cw6 - 0.16,
+      h: b.bh - (sp ? 0.46 : 0.87), fontSize: sp ? 9.5 : 11, color: MUTED, isTextBox: true,
+      margin: 0, align: "center", lineSpacingMultiple: 1.22, objectName: `tierd${i}_${k}` });
+  });
   if (i < tiers.length - 1) {
-    s.addText(">", { x: x + cw6, y: y + tierH / 2 - 0.22, w: gap6, h: 0.44, fontSize: 15, bold: true,
-      color: RULE, isTextBox: true, margin: 0, align: "center", objectName: "arrow" + i });
+    const mids = (tr.split || tiers[i + 1].split) ? subMid : [tierH / 2];
+    mids.forEach((cy, k) => {
+      s.addText(">", { x: x + cw6, y: y + cy - 0.22, w: gap6, h: 0.44, fontSize: 15, bold: true,
+        color: RULE, isTextBox: true, margin: 0, align: "center", objectName: `arrow${i}_${k}` });
+    });
   }
 });
-const fnTop5 = footnote(s, ["Deployment: Docker Compose runs nine services on one workstation. The Spark cluster has one master and two workers."]);
+const fnTop5 = footnote(s, [
+  "Paths: Kafka carries the live REST feed only. The batch loaders write the archives to bronze with no broker. Both paths land in one bronze layout.",
+  "Deployment: Docker Compose runs nine services on one workstation. The Spark cluster has one master and two workers.",
+]);
 cardAt(s, { fill: GREY, head: "Why three tiers rather than one",
   body: "Repeated work is the largest cost in this pipeline. A single tier has two penalties. Each schema change forces a new pull from OpenSky, and OpenSky limits the request rate. Each metric change forces a new cleaning pass, the most expensive stage. Separate tiers remove both penalties." },
   X, y + tierH + 0.24, W, fnTop5 - (y + tierH + 0.24) - 0.18);
@@ -559,20 +580,20 @@ s.addNotes("The project uses a constant-velocity model, not a constant-accelerat
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Approach" });
 s.addText("Noise ladder and experiment design", { placeholder: "title" });
 const fnTop11 = footnote(s, [
-  "Design: 3 methods by 4 profiles gives 12 cells. Each cell runs against both inputs, with seed 42.",
+  "Design: 3 methods by 4 profiles gives 12 cells, both inputs, seed 42. A position jump offsets latitude and longitude by up to 2 degrees.",
   "Six metrics per cell: segmentation precision, recall and F1 within a 5 s tolerance; boundary time error; trajectory continuity; coverage; position RMSE; deviation-detection precision, recall and F1.",
 ]);
-s.addNotes("A uniqueness constraint over month, source, method and noise makes a repeat run idempotent. Every figure therefore traces to one execution, and not to the best of several.");
-y = lead(s, "Real ADS-B has no ground truth, so absolute position error needs a synthetic input. Four cumulative profiles degrade synthetic trajectories with known truth.");
+s.addNotes("A uniqueness constraint over month, source, method and noise makes a repeat run idempotent. Every figure therefore traces to one execution, and not to the best of several. The injector applies the four operations in one order: row removal, duplicate insertion, position jump, out-of-order permutation. The code defines no Gaussian position or altitude jitter in these four profiles.");
+y = lead(s, "Real ADS-B has no ground truth, so absolute position error needs a synthetic input. Four profiles apply the same four faults at rising rates.");
 y = cardRow(s, y, [
   { fill: "F0F2F5", head: "N0   Clean",
-    body: "This profile makes no change. It sets the correctness floor. A correct method reaches near-zero error here." },
-  { fill: "EDF1F6", head: "N1   Gaussian jitter",
-    body: "This profile adds jitter to position and altitude. It approximates GPS multipath and clock skew." },
-  { fill: "F5EDE8", headColor: ORANGE, head: "N2   Plus 10% message loss",
-    body: "This profile drops signal at the receiver. It tests continuity and coverage. A gap-aware method declares no false break." },
-  { fill: "FBEDE6", headColor: ORANGE, head: "N3   Plus 10% reordering",
-    body: "Two receivers send one observation at different times. This profile tests event-time order." },
+    body: "All four rates are zero. This profile sets the correctness floor. A correct method reaches near-zero error here." },
+  { fill: "EDF1F6", head: "N1   Light",
+    body: "dropped rows 2%\nduplicates 0.5%\nreordered rows 1%\nposition jumps 0.1%" },
+  { fill: "F5EDE8", headColor: ORANGE, head: "N2   Moderate",
+    body: "dropped rows 5%\nduplicates 1%\nreordered rows 3%\nposition jumps 0.5%" },
+  { fill: "FBEDE6", headColor: ORANGE, head: "N3   Severe",
+    body: "dropped rows 10%\nduplicates 2%\nreordered rows 10%\nposition jumps 1%" },
 ]);
 cardRow(s, y, [
   { fill: PALE, head: "Input 1: synthetic, known truth",
@@ -725,7 +746,7 @@ s.addTable(tableRows([
    "No shuffle on the single-host path, by construction"],
   ["Scaling efficiency", "Partition-commit timestamps, per month and per table",
    "131 s and 148 s for the second and third added month"],
-  ["Robustness", "The N0 to N3 ladder: jitter, missing records and out-of-order records, on both inputs",
+  ["Robustness", "The N0 to N3 ladder: gaps, duplicates, reordering and position jumps, on both inputs",
    "12 of 12 cells complete on each input"],
 ], { size: 11.5, headSize: 11.5 }),
   { x: X, y: y, w: W, colW: [2.30, 5.18, 4.45], rowH: 0.40,

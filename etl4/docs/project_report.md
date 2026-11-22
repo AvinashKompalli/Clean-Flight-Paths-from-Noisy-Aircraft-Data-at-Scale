@@ -70,29 +70,33 @@ The fifth constrained the architecture more than the other five combined. Scalin
 
 ### 2.1 High-Level Design
 
-The pipeline has seven stages in a linear flow. Data moves forward through quality tiers, and each tier persists its output so downstream tiers can be rebuilt without re-running upstream work.
+The pipeline has seven stages. Data moves forward through quality tiers, and each tier persists its output so downstream tiers can be rebuilt without re-running upstream work. The design separates batch ingestion from the live streaming path, and the two converge at bronze.
 
 ```
-          OpenSky Network
-  monthly archives | live REST feed | daily state archives
-                     |
-                Apache Kafka
-          raw topic + dead-letter topic
-                     |
-                 Bronze tier
-       source schema preserved, partitioned by day
-                     |
-          Silver tier, Data Vault 2.0
-      hubs + links + satellites, partitioned by month
-                     |
-          Gold tier, dimensional marts
-      fact and dimension tables, partitioned by month
-                     |
-              Experiment matrix
-       3 methods x 4 noise profiles = 12 cells
-                     |
-    Relational evaluation store and dashboards
+                        OpenSky Network
+   monthly flight archives | daily state archives | live REST feed
+              |                                        |
+      Batch ingest path                          Apache Kafka
+  download, convert, write bronze        raw topic + dead-letter topic
+              |                                        |
+              +-------------------+--------------------+
+                                  |
+                             Bronze tier
+             source schema preserved, partitioned by day
+                                  |
+                     Silver tier, Data Vault 2.0
+         hubs + links + satellites, partitioned by month
+                                  |
+                     Gold tier, dimensional marts
+         fact and dimension tables, partitioned by month
+                                  |
+                          Experiment matrix
+                3 methods x 4 noise profiles = 12 cells
+                                  |
+              Relational evaluation store and dashboards
 ```
+
+Monthly flight-record archives and daily state-vector files enter through the batch loaders and are written directly to bronze. Live REST observations are buffered through Kafka and landed in the same bronze layout by the Kafka consumer. No historical archive passes through the broker.
 
 The bronze, silver and gold separation follows the Medallion pattern, chosen over a single-tier design because the dominant cost here is repeated work. With one tier, every schema change forces a fresh pull from OpenSky, which is rate-limited and intermittently unavailable, and every metric change forces a fresh cleaning pass, the most CPU-intensive stage in the pipeline. Separate tiers decouple both.
 
@@ -165,7 +169,16 @@ Constant velocity was chosen over constant-acceleration and coordinated-turn alt
 
 Two optimisations were required to meet the throughput target. The per-flight filter loop operates on raw numeric arrays rather than iterating DataFrame rows, improving wall time threefold. The cross-track distance computation was converted from a per-row function application to a vectorised array operation; profiling had shown the per-row form consuming approximately 95 percent of matrix wall time, and the vectorised form reduced that computation seventeenfold. This was the single largest optimisation in the project.
 
-**Noise model.** Four cumulative profiles degrade synthetic trajectories with known truth. **N0** applies no modification, establishing the correctness floor: a method that does not reach near-zero error on clean input is broken, and the matrix must detect that. **N1** applies Gaussian jitter to position and altitude, approximating GPS multipath, receiver clock skew and atmospheric refraction, the most representative single-source noise in operational ADS-B. **N2** adds ten percent message loss, simulating receiver loss-of-signal, which stresses continuity and coverage because a gap-aware method must interpolate across the loss rather than declare a false break. **N3** adds ten percent out-of-order delivery, simulating two receivers forwarding the same observation at slightly different times; it is the hardest profile, testing whether event-time ordering survives when arrival-time ordering is scrambled.
+**Noise model.** Four deterministic profiles apply controlled record-level perturbations to synthetic trajectories carrying truth identifiers. `etl4/bench/noise.py` defines the following rates.
+
+| Profile | Dropped rows (gaps) | Added duplicates | Reordered rows | Position jumps |
+|---|---|---|---|---|
+| N0 | 0% | 0% | 0% | 0% |
+| N1 | 2% | 0.5% | 1% | 0.1% |
+| N2 | 5% | 1% | 3% | 0.5% |
+| N3 | 10% | 2% | 10% | 1% |
+
+The injector applies the operations in this order: row removal, duplicate insertion, position-jump perturbation, and out-of-order permutation. A position jump offsets latitude and longitude by a value drawn uniformly from plus or minus two degrees. The code does not define Gaussian position or altitude jitter in these four profiles. N0 establishes the correctness floor: a method that does not reach near-zero error on clean input is broken, and the matrix must detect that. N3 is the most severe profile on every rate, and it tests whether event-time ordering survives when arrival-time ordering is scrambled. The `NoiseTruth` object records the original identifiers and the rows affected by each operation, so evaluation scores against the pre-noise synthetic reference rather than re-deriving it from the seed.
 
 Reordering applies a single precomputed permutation rather than row-wise swaps, which would trigger copy-on-assignment and dominate the cost of noise injection itself. The seed is fixed, so every run on the same input produces byte-identical degraded output.
 
